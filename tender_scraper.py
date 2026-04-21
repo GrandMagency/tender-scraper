@@ -116,6 +116,24 @@ SIMAP_SEARCH_TERMS = [
 # ── vergabe.nrw.de (NRW, Німеччина) ────────────────────────────────────────────
 VERGABE_NRW_RSS = "https://www.vergabe.nrw.de/rss.xml"
 
+# ── deutsches-ausschreibungsblatt.de (DE, знайдено через DevTools 2026-04-21) ──
+DAB_SEARCH_URL = (
+    "https://www.deutsches-ausschreibungsblatt.de"
+    "/lookup/finder/getResultsBySearchObject"
+)
+DAB_BASE_URL = "https://www.deutsches-ausschreibungsblatt.de"
+# Примітка: "solarcarport" (1 слово) → 1 результат; "solar carport" → 169
+# Всі результати повертаються одним запитом без пагінації
+DAB_SEARCH_TERMS = [
+    "solar carport",
+    "photovoltaik carport",
+    "parkplatz photovoltaik",
+    "parkhaus solar",
+    "parkplatzüberdachung",
+]
+# vergabetyp: 1=Ausschreibung (активний), 2=Vergabe (в процесі), 3=Vergebener Auftrag (виданий)
+DAB_VERGABETYP_LABELS = {1: "Ausschreibung", 2: "Vergabe", 3: "Vergebener Auftrag"}
+
 # ── State-файл (dedup між запусками) ──────────────────────────────────────────
 STATE_FILE = Path(".state.json")
 
@@ -995,6 +1013,170 @@ def process_vergabe_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── deutsches-ausschreibungsblatt.de (DE) ─────────────────────────────────────
+
+class _PostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Слідує 307/308 редіректам зберігаючи POST метод і тіло."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if code in (307, 308):
+            return urllib.request.Request(
+                newurl,
+                data=req.data,
+                headers={k: v for k, v in req.header_items()
+                         if k.lower() not in ("host", "content-length")},
+                method="POST",
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_DAB_OPENER = urllib.request.build_opener(_PostRedirectHandler())
+
+
+def search_dab_de(days: int, verbose: bool = True):
+    """
+    Generator: пошук тендерів на deutsches-ausschreibungsblatt.de через POST API.
+    Всі результати повертаються одним запитом (без пагінації).
+    Безкоштовно: назва, місто, дедлайн, тип. Повний текст — за підпискою.
+    """
+    if verbose:
+        print(f"\n[DAB.de] Пошук ({days}д, {len(DAB_SEARCH_TERMS)} terms)...")
+
+    today = date.today()
+    seen_ids: set[str] = set()
+    yielded = 0
+
+    headers = {
+        "Content-Type": "application/json",
+        "Referer": f"{DAB_BASE_URL}/auftrag-finden",
+        "Origin": DAB_BASE_URL,
+        "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+    }
+
+    for term in DAB_SEARCH_TERMS:
+        body = json.dumps({
+            "searchData": {"suchbegriffe": {"begriffe": term}}
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            DAB_SEARCH_URL, data=body, headers=headers, method="POST"
+        )
+
+        try:
+            with _DAB_OPENER.open(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            if verbose:
+                print(f"  [{term}] помилка: {e}")
+            continue
+
+        tenders = data.get("payload", {}).get("kopfdaten", [])
+        if verbose:
+            print(f"  [{term}] {len(tenders)} результатів")
+
+        for t in tenders:
+            uuid = t.get("uuid", "")
+            if not uuid or uuid in seen_ids:
+                continue
+            seen_ids.add(uuid)
+
+            # Дедлайн/закінчення оголошення
+            anzeige_ende = t.get("anzeige_ende", "")
+            deadline_dt: date | None = None
+            try:
+                deadline_dt = datetime.strptime(anzeige_ende[:10], "%Y-%m-%d").date()
+                # Пропускаємо вже прострочені оголошення
+                if deadline_dt < today:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+            # Фільтр за тематикою (в назві)
+            title = t.get("titel", "") or ""
+            search_text = title.lower()
+            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+            has_parking = any(pt.lower() in search_text for pt in PARKING_PV_TERMS)
+            has_solar   = any(st.lower() in search_text for st in SOLAR_TERMS)
+
+            if not (has_carport or (has_parking and has_solar)):
+                continue
+
+            keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+
+            vergabetyp = t.get("vergabetyp", 0)
+            ort = t.get("ort", "")
+
+            # Формуємо slug для URL (як на сайті)
+            slug = re.sub(r"[^a-z0-9\-]", "", re.sub(r"\s+", "-",
+                title.lower()
+                .replace(":", "").replace("/", "")
+                .replace("ä", "ae").replace("ö", "oe")
+                .replace("ü", "ue").replace("ß", "ss")
+            )).strip("-")
+            link = f"{DAB_BASE_URL}/ausschreibung#/{slug}_{uuid}"
+
+            days_left = (deadline_dt - today).days if deadline_dt else None
+
+            yielded += 1
+            yield {
+                "uuid":           uuid,
+                "title":          title[:300],
+                "ort":            ort,
+                "link":           link,
+                "anzeige_ende":   anzeige_ende,
+                "deadline_dt":    deadline_dt,
+                "days_left":      days_left,
+                "vergabetyp":     vergabetyp,
+                "eu_vergabe":     t.get("eu_vergabe", 0),
+                "keywords_found": keywords_found,
+            }
+
+        time.sleep(0.5)
+
+    if verbose:
+        print(f"  DAB.de: {yielded} релевантних тендерів")
+
+
+def process_dab_item(item: dict, seen_ids: set, state: dict,
+                     min_score: int) -> dict | None:
+    """Нормалізує DAB.de тендер у стандартний tender record."""
+    tender_id = f"dab_{item['uuid'].replace('-', '_')}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    days_left  = item.get("days_left")
+    deadline_dt = item.get("deadline_dt")
+
+    # Score: тільки keywords і дедлайн (CPV і бюджет за підпискою)
+    # Базовий 25 — DAB вже пошукав за нашими термінами
+    # Ausschreibung (vergabetyp=1) отримує додатковий бонус +10
+    vergabetyp_bonus = 10 if item.get("vergabetyp") == 1 else 0
+    score = 25 + vergabetyp_bonus + score_tender([], item["keywords_found"], None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    vergabetyp_label = DAB_VERGABETYP_LABELS.get(item.get("vergabetyp", 0), "")
+    buyer_name = f"{item['ort']} ({vergabetyp_label})" if vergabetyp_label else item["ort"]
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  item["uuid"],
+        "title":               item["title"][:300],
+        "buyer_name":          buyer_name,
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       item["anzeige_ende"],
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    "",
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "DAB.de",
+    }
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1048,8 +1230,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw"],
-        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw), ted, bund, simap, nrw (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw", "dab"],
+        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de), ted, bund, simap, nrw, dab (default: all)",
     )
     args = parser.parse_args()
 
@@ -1074,6 +1256,8 @@ def main():
         active_sources.append("simap.ch")
     if args.source in ("all", "nrw") and region in ("DE", "DACH"):
         active_sources.append("vergabe.nrw")
+    if args.source in ("all", "dab") and region in ("DE", "DACH"):
+        active_sources.append("DAB.de")
 
     if verbose:
         print(f"\n📋 Tender Scraper — {region}")
@@ -1165,6 +1349,22 @@ def main():
     if args.source in ("all", "nrw") and region in ("DE", "DACH"):
         for item in search_vergabe_nrw(args.days, verbose=verbose):
             record = process_vergabe_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── DAB.de (тільки для DE або DACH) ──────────────────────────────────────────
+    if args.source in ("all", "dab") and region in ("DE", "DACH"):
+        for item in search_dab_de(args.days, verbose=verbose):
+            record = process_dab_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
