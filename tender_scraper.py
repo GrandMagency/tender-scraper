@@ -585,7 +585,7 @@ def main():
     for notice in search_ted(countries, args.days, verbose=verbose):
         record = process_notice(
             notice, seen_ids,
-            {} if args.no_dedup else state,
+            {"tenders": {}} if args.no_dedup else state,
             args.min_score,
         )
         if record is None:
