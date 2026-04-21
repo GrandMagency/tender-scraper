@@ -88,6 +88,7 @@ TED_FIELDS = [
     "estimated-value-lot",    # Бюджет (lot)
     "estimated-value-proc",   # Бюджет (procedure)
     "classification-cpv",     # CPV-коди (list)
+    "short-description",      # Короткий опис (multilingual) — для keyword match
     "notice-type",            # Тип тендера
 ]
 
@@ -184,20 +185,29 @@ def build_query(countries: list[str], days: int) -> str:
       publication-date >= today(-N)  — відносна дата (N днів назад)
       AND / OR / NOT           — логічні оператори
     """
-    # Група 1: явний carport у назві
-    carport_part = " OR ".join(f'notice-title ~ "{kw}"' for kw in CARPORT_KEYWORDS)
+    # Група 1: "Solarcarport" / "PV-Carport" в будь-якому полі (FT) —
+    #   хтось явно написав це слово в документі — найгарячіші ліди
+    ft_carport = " OR ".join(f'FT ~ "{kw}"' for kw in [
+        "Solarcarport", "Solar-Carport", "PV-Carport",
+        "Carport Photovoltaik", "Photovoltaik Carport",
+        "Solar Carport",
+    ])
 
-    # Група 2: паркінг + PV (Parkplatz/Parkhaus AND Photovoltaik/Solar)
-    parking_or  = " OR ".join(f'notice-title ~ "{t}"' for t in PARKING_PV_TERMS)
-    solar_or    = " OR ".join(f'notice-title ~ "{t}"' for t in SOLAR_TERMS)
-    parking_pv_part = f"({parking_or}) AND ({solar_or})"
+    # Група 2: Carport + Solar в НАЗВІ тендера
+    title_carport = " OR ".join(f'notice-title ~ "{kw}"' for kw in CARPORT_KEYWORDS)
+    title_solar   = " OR ".join(f'notice-title ~ "{t}"' for t in SOLAR_TERMS)
+    title_carport_pv = f"({title_carport}) AND ({title_solar})"
+
+    # Група 3: Паркінг + PV в НАЗВІ (Parkplatz/Parkdeck AND Photovoltaik/Solar)
+    title_parking    = " OR ".join(f'notice-title ~ "{t}"' for t in PARKING_PV_TERMS)
+    title_parking_pv = f"({title_parking}) AND ({title_solar})"
 
     # Країни і дата
     country_parts = " OR ".join(f"buyer-country IN ({c})" for c in countries)
     date_filter   = f"publication-date >= today(-{days})"
 
     query = (
-        f"({carport_part} OR ({parking_pv_part}))"
+        f"({ft_carport} OR ({title_carport_pv}) OR ({title_parking_pv}))"
         f" AND ({country_parts})"
         f" AND {date_filter}"
     )
@@ -384,9 +394,10 @@ def extract_cpv_codes(notice: dict) -> list[str]:
 
 
 def find_keywords(notice: dict) -> list[str]:
-    """Шукає SOLAR_KEYWORDS у тексті notice."""
-    title = notice.get("notice-title", "")
-    text = get_multilingual(title, ("deu", "eng")).lower()
+    """Шукає SOLAR_KEYWORDS у назві + описі notice."""
+    title = get_multilingual(notice.get("notice-title", ""), ("deu", "eng"))
+    desc  = get_multilingual(notice.get("short-description", ""), ("deu", "eng"))
+    text  = (title + " " + desc).lower()
     return [kw for kw in SOLAR_KEYWORDS if kw.lower() in text]
 
 
