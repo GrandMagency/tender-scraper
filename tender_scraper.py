@@ -1092,15 +1092,22 @@ def search_dab_de(days: int, verbose: bool = True):
             # Фільтр за тематикою (в назві)
             title = t.get("titel", "") or ""
             search_text = title.lower()
-            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+            # Явні solar-carport терміни не потребують AND Solar
+            has_explicit = any(
+                kw.lower() in search_text
+                for kw in ["solarcarport", "solar-carport", "pv-carport", "parkplatzüberdachung"]
+            )
+            # Загальний "carport" — тільки якщо є Solar/PV поряд
+            has_generic_carport = "carport" in search_text
             has_parking = any(pt.lower() in search_text for pt in PARKING_PV_TERMS)
             has_solar   = any(st.lower() in search_text for st in SOLAR_TERMS)
 
-            if not (has_carport or (has_parking and has_solar)):
+            if not (has_explicit or
+                    (has_generic_carport and has_solar) or
+                    (has_parking and has_solar)):
                 continue
 
             keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
-
             vergabetyp = t.get("vergabetyp", 0)
             ort = t.get("ort", "")
 
