@@ -51,17 +51,17 @@ COUNTRY_ALPHA2 = {"DEU": "DE", "AUT": "AT", "CHE": "CH"}
 # TED API query: оператор ~ шукає підрядок у notice-title
 # Перевірено: "Solarcarport", "Carport" (з AND Solar), "Parkplatz" (з AND PV) — дають результати
 
-# Група 1: явний "Carport" в назві
+# Група 1: явний "Carport" або специфічний parking-solar термін
 CARPORT_KEYWORDS = [
     "Solarcarport", "Solar-Carport",
     "PV-Carport",
-    "Carport",          # буде зʼєднано AND з PV у query
+    "Carport",               # буде зʼєднано AND з PV у query
+    "Parkplatzüberdachung",  # "накриття паркінгу" — настільки специфічний, що AND Solar не треба
 ]
 
 # Група 2: паркінг + PV (Parkplatz + Photovoltaik/Solar/PV)
 PARKING_PV_TERMS = [
     "Parkplatz", "Parkhaus", "Stellplatz", "Parkdeck",
-    "Parkplatzüberdachung",   # дуже специфічний — уже означає "накриття паркінгу"
     "Überdachung",            # "дах/навіс" — буде AND Solar у query
 ]
 SOLAR_TERMS      = ["Photovoltaik", "Solar", "PV-Anlage"]
@@ -455,16 +455,15 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
     # Keywords
     keywords_found = find_keywords(notice)
 
-    # TED query вже відфільтрував релевантні тендери (FT + title)
-    # keywords_found може бути пустим якщо match був у тілі документа (FT)
-    if not keywords_found and not cpv_codes:
-        return None
-
     # Бюджет
     value_eur = extract_value(notice)
 
     # Score
-    priority_score = score_tender(cpv_codes, keywords_found, value_eur, days_left)
+    # TED query вже відфільтрував за релевантністю (FT + title match).
+    # Якщо немає keywords у заголовку і немає CPV → це FT-only match (keyword у тілі документа).
+    # Додаємо базовий бонус 15 щоб FT-ліди проходили фільтр min-score=20.
+    ft_base = 15 if (not keywords_found and not cpv_codes) else 0
+    priority_score = ft_base + score_tender(cpv_codes, keywords_found, value_eur, days_left)
 
     if priority_score < min_score:
         return None
