@@ -377,7 +377,7 @@ def find_keywords(notice: dict) -> list[str]:
 
 def ted_notice_url(pub_number: str) -> str:
     """URL на сторінку тендера."""
-    return f"https://ted.europa.eu/en/notice/{pub_number}"
+    return f"https://ted.europa.eu/en/notice/-/detail/{pub_number}"
 
 
 def process_notice(notice: dict, seen_ids: set, state: dict,
