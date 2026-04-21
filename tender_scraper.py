@@ -612,11 +612,17 @@ def search_bund_de(days: int, verbose: bool = True):
         description = (item.findtext("description") or "").strip()
         guid        = (item.findtext("guid") or link).strip()
 
-        # Фільтр по solar keywords (bund.de використовує ширший список)
+        # Фільтр: або явний carport, або parking + solar (AND логіка як у TED)
         search_text = (title + " " + _strip_html(description)).lower()
-        keywords_found = [kw for kw in BUND_KEYWORDS if kw.lower() in search_text]
-        if not keywords_found:
+
+        has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+        has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+        has_solar   = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+        if not (has_carport or (has_parking and has_solar)):
             continue
+
+        keywords_found = [kw for kw in BUND_KEYWORDS if kw.lower() in search_text]
 
         yielded += 1
         yield {
