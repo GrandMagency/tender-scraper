@@ -366,7 +366,10 @@
 <!-- ── Header ──────────────────────────────────────────────────────────────── -->
 <div class="header">
   <h1>📋 Tender Leads — Solar Carport DACH</h1>
-  <button class="filter-toggle-btn" id="filter-toggle" onclick="toggleFilters()">Фільтри ▼</button>
+  <div style="display:flex;align-items:center;gap:8px">
+    <a href="./parking_viewer.html" style="font-size:11px;color:#A003B2;text-decoration:none;border:1px solid #A003B2;border-radius:4px;padding:3px 8px;white-space:nowrap" title="Parking Leads">🅿 Parking View</a>
+    <button class="filter-toggle-btn" id="filter-toggle" onclick="toggleFilters()">Фільтри ▼</button>
+  </div>
   <div class="stats-bar">
     <div class="stat">
       <span class="stat-val" id="stat-total">—</span>
@@ -766,14 +769,10 @@ function loadText(text) {
   const scores    = allData.map(r => parseInt(r.priority_score) || 0);
   const avgScore  = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
 
-  // Latest publication date
-  const dates = allData.map(r => r.publication_date).filter(Boolean).sort();
-  const latestDate = dates.length ? fmtDate(dates[dates.length - 1]) : '—';
-
-  document.getElementById('stat-total').textContent     = allData.length.toLocaleString('uk');
+  document.getElementById('stat-total').textContent      = allData.length.toLocaleString('uk');
   document.getElementById('stat-with-email').textContent = withEmail.toLocaleString('uk');
   document.getElementById('stat-avg-score').textContent  = avgScore;
-  document.getElementById('stat-updated').textContent    = latestDate;
+  // stat-updated встановлюється з Last-Modified хедера CSV у auto-fetch
 
   document.getElementById('loading').style.display    = 'none';
   document.getElementById('table').style.display      = 'table';
@@ -789,6 +788,12 @@ function loadText(text) {
   try {
     const resp = await fetch('./tenders_dach_latest.csv');
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const lastMod = resp.headers.get('last-modified');
+    if (lastMod) {
+      const d = new Date(lastMod);
+      document.getElementById('stat-updated').textContent =
+        d.toLocaleDateString('uk-UA', {day:'2-digit', month:'2-digit', year:'numeric'});
+    }
     const total  = parseInt(resp.headers.get('content-length') || '0');
     const reader = resp.body.getReader();
     const chunks = [];
