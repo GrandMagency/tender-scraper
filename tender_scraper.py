@@ -20,11 +20,14 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 # ── TED API (v3, eForms) ───────────────────────────────────────────────────────
@@ -78,6 +81,12 @@ TED_FIELDS = [
     "classification-cpv",     # CPV-коди (list)
     "notice-type",            # Тип тендера
 ]
+
+# ── Bund.de RSS ───────────────────────────────────────────────────────────────
+BUND_RSS_URL = (
+    "https://www.service.bund.de/Content/Globals/Functions/"
+    "RSSFeed/RSSGenerator_Ausschreibungen.xml"
+)
 
 # ── State-файл (dedup між запусками) ──────────────────────────────────────────
 STATE_FILE = Path(".state.json")
@@ -459,6 +468,7 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
         "publication_date": pub_date,
         "priority_score": priority_score,
         "ted_url": ted_notice_url(str(pub_number)),
+        "source": "TED",
     }
 
 
@@ -484,6 +494,174 @@ def tg_notify(msg: str) -> None:
         urllib.request.urlopen(req, timeout=8)
     except Exception:
         pass
+
+
+# ── Bund.de RSS scraper ────────────────────────────────────────────────────────
+
+def _strip_html(text: str) -> str:
+    """Видаляє HTML-теги і декодує базові entities."""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">") \
+               .replace("&nbsp;", " ").replace("&#39;", "'").replace("&quot;", '"')
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_bund_description(html: str) -> dict:
+    """
+    Витягує структуровані поля з HTML-опису bund.de RSS item.
+    Поля: Vergabestelle (buyer), Angebotsfrist/Bewerbungsfrist (deadline), Erfüllungsort (location).
+    """
+    result: dict = {}
+    plain = _strip_html(html)
+    # Кожен рядок HTML виглядає як: <p><strong>Vergabestelle:</strong> Назва</p>
+    for field, labels in [
+        ("buyer",    ["Vergabestelle", "Auftraggeber", "Auftraggeber/in"]),
+        ("deadline", ["Angebotsfrist", "Bewerbungsfrist", "Einreichungsfrist"]),
+        ("location", ["Erfüllungsort", "Leistungsort"]),
+    ]:
+        for label in labels:
+            # Шукаємо в plain тексті: "Label: Значення"
+            m = re.search(
+                rf"{re.escape(label)}\s*:\s*(.+?)(?=\s{3,}|\Z|[A-Z][a-z]+\s*:)",
+                plain,
+            )
+            if m:
+                result[field] = m.group(1).strip().rstrip(".")
+                break
+    return result
+
+
+def _parse_bund_date(raw: str) -> tuple[str, int | None]:
+    """
+    Парсить дату з bund.de (формат DD.MM.YYYY або DD.MM.YYYY HH:MM).
+    Повертає (YYYY-MM-DD, days_left) або ("", None).
+    """
+    if not raw:
+        return "", None
+    m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", raw)
+    if not m:
+        return "", None
+    iso = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    try:
+        dl = datetime.strptime(iso, "%Y-%m-%d").date()
+        days_left = (dl - date.today()).days
+        return iso, days_left
+    except ValueError:
+        return iso, None
+
+
+def _bund_tender_id(guid: str) -> str:
+    """Stable dedup ID з bund.de GUID."""
+    # GUID — URL виду https://www.service.bund.de/IMPORTE/Ausschreibungen/abc123.html
+    slug = guid.rstrip("/").split("/")[-1].replace(".html", "")
+    return f"bund_{slug}" if slug else f"bund_{abs(hash(guid)) % 10**10}"
+
+
+def search_bund_de(days: int, verbose: bool = True):
+    """
+    Generator: завантажує bund.de RSS і повертає items що містять SOLAR_KEYWORDS.
+    """
+    if verbose:
+        print(f"\n[Bund.de] Завантаження RSS ({days}д)...")
+
+    req = urllib.request.Request(
+        BUND_RSS_URL,
+        headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+    except Exception as e:
+        if verbose:
+            print(f"  Bund.de fetch error: {e}")
+        return
+
+    try:
+        root = ET.fromstring(raw)
+    except Exception as e:
+        if verbose:
+            print(f"  Bund.de XML parse error: {e}")
+        return
+
+    cutoff = date.today() - timedelta(days=days)
+    items = root.findall(".//item")
+
+    if verbose:
+        print(f"  {len(items)} items у фіді, фільтруємо за {days}д + keywords...")
+
+    yielded = 0
+    for item in items:
+        # Перевірка дати публікації
+        pub_raw = item.findtext("pubDate", "")
+        pub_dt: date | None = None
+        try:
+            pub_dt = parsedate_to_datetime(pub_raw).date()
+            if pub_dt < cutoff:
+                continue
+        except Exception:
+            pass  # без дати — включаємо
+
+        title       = (item.findtext("title") or "").strip()
+        link        = (item.findtext("link") or "").strip()
+        description = (item.findtext("description") or "").strip()
+        guid        = (item.findtext("guid") or link).strip()
+
+        # Фільтр по solar keywords
+        search_text = (title + " " + _strip_html(description)).lower()
+        keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+        if not keywords_found:
+            continue
+
+        yielded += 1
+        yield {
+            "title":          title,
+            "link":           link,
+            "description":    description,
+            "guid":           guid,
+            "pub_dt":         pub_dt or date.today(),
+            "keywords_found": keywords_found,
+        }
+
+    if verbose:
+        print(f"  Bund.de: {yielded} релевантних items")
+
+
+def process_bund_item(item: dict, seen_ids: set, state: dict,
+                      min_score: int) -> dict | None:
+    """Нормалізує bund.de RSS item у стандартний tender record."""
+    tender_id = _bund_tender_id(item["guid"])
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    desc_fields  = _parse_bund_description(item["description"])
+    buyer_name   = desc_fields.get("buyer", "")
+    deadline_iso, days_left = _parse_bund_date(desc_fields.get("deadline", ""))
+
+    # Score: тільки keywords і дедлайн (CPV і бюджет недоступні з RSS)
+    score = score_tender([], item["keywords_found"], None, days_left)
+    if score < min_score:
+        return None
+
+    pub_number = item["guid"].rstrip("/").split("/")[-1].replace(".html", "") or tender_id
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  pub_number,
+        "title":               item["title"][:300],
+        "buyer_name":          buyer_name,
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "Bund.de",
+    }
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -536,6 +714,12 @@ def main():
         action="store_true",
         help="Повернути всі тендери без перевірки state (для digest)",
     )
+    parser.add_argument(
+        "--source",
+        default="all",
+        choices=["all", "ted", "bund"],
+        help="Джерело: all (TED + Bund.de), ted, bund (default: all)",
+    )
     args = parser.parse_args()
 
     verbose = not args.quiet
@@ -552,6 +736,7 @@ def main():
     if verbose:
         print(f"\n📋 Tender Scraper — {region}")
         print(f"   Регіони: {', '.join(countries)}")
+        print(f"   Джерела: {args.source.upper()}")
         print(f"   Останні {args.days} днів")
         print(f"   Мін. score: {args.min_score}")
         print(f"   Вихід: {output_path}\n")
@@ -582,26 +767,41 @@ def main():
             writer = csv.DictWriter(csv_file, fieldnames=list(sample.keys()))
             writer.writeheader()
 
-    for notice in search_ted(countries, args.days, verbose=verbose):
-        record = process_notice(
-            notice, seen_ids,
-            {"tenders": {}} if args.no_dedup else state,
-            args.min_score,
-        )
-        if record is None:
-            continue
+    dedup_state = {"tenders": {}} if args.no_dedup else state
 
-        ensure_writer(record)
-        writer.writerow(record)
-        csv_file.flush()
+    # ── TED ──────────────────────────────────────────────────────────────────────
+    if args.source in ("all", "ted"):
+        if verbose:
+            print("[TED] Пошук тендерів...")
+        for notice in search_ted(countries, args.days, verbose=verbose):
+            record = process_notice(notice, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
 
-        seen_ids.add(record["tender_id"])
-        if not args.no_dedup:
-            state["tenders"][record["tender_id"]] = record["publication_number"]
-        total_records += 1
-
-        if verbose and total_records % 10 == 0:
-            print(f"  ✓ {total_records} тендерів записано...")
+    # ── Bund.de (тільки для DE або DACH) ─────────────────────────────────────────
+    if args.source in ("all", "bund") and region in ("DE", "DACH"):
+        for item in search_bund_de(args.days, verbose=verbose):
+            record = process_bund_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
 
     if csv_file:
         csv_file.close()

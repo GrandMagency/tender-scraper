@@ -192,6 +192,20 @@
   }
   a.ted-link:hover { background: #A002B2; color: #fff; }
 
+  /* Source badge */
+  .src-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+  .src-TED     { background: #0a1a30; color: #60a5fa; border: 1px solid #1a3a6a; }
+  .src-Bund    { background: #0e2a18; color: #4ade80; border: 1px solid #1a5a30; }
+  .src-SIMAP   { background: #1a1a08; color: #facc15; border: 1px solid #4a4a10; }
+
   /* Keywords badge */
   .kw-badge {
     display: inline-block;
@@ -359,6 +373,15 @@
     </select>
   </div>
   <div class="filter-group">
+    <span class="filter-label">Платформа</span>
+    <select id="filter-source">
+      <option value="">Всі</option>
+      <option value="TED">TED (EU)</option>
+      <option value="Bund.de">Bund.de (DE)</option>
+      <option value="SIMAP">SIMAP (CH)</option>
+    </select>
+  </div>
+  <div class="filter-group">
     <span class="filter-label">Email</span>
     <select id="filter-email">
       <option value="">Всі</option>
@@ -392,7 +415,8 @@
         <th onclick="sortBy('days_until_deadline')">Днів</th>
         <th class="no-sort">Email</th>
         <th class="no-sort">Ключ. слова</th>
-        <th class="no-sort">TED</th>
+        <th onclick="sortBy('source')">Платформа</th>
+        <th class="no-sort">Посилання</th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
@@ -509,6 +533,9 @@ function render() {
     const email   = r.buyer_email || '';
     const kw      = r.keyword_match || '';
     const tedUrl  = r.ted_url || '';
+    const source  = r.source || 'TED';
+    const srcKey  = source.split('.')[0]; // "Bund.de" → "Bund"
+    const linkLabel = source === 'Bund.de' ? 'Bund ↗' : source === 'SIMAP' ? 'SIMAP ↗' : 'TED ↗';
 
     return `<tr>
       <td><span class="score-badge ${scoreClass(score)}">${score}</span></td>
@@ -520,7 +547,8 @@ function render() {
       <td class="days ${dClass}">${daysStr}</td>
       <td>${email ? `<a class="email-link" href="mailto:${esc(email)}" title="${esc(email)}">${esc(email)}</a>` : '<span style="color:#333">—</span>'}</td>
       <td>${kw ? `<span class="kw-badge" title="${esc(kw)}">${esc(kw.split(',')[0])}</span>` : '<span style="color:#333">—</span>'}</td>
-      <td>${tedUrl ? `<a class="ted-link" href="${esc(tedUrl)}" target="_blank" rel="noopener">TED ↗</a>` : '—'}</td>
+      <td><span class="src-badge src-${srcKey}">${esc(source)}</span></td>
+      <td>${tedUrl ? `<a class="ted-link" href="${esc(tedUrl)}" target="_blank" rel="noopener">${linkLabel}</a>` : '—'}</td>
     </tr>`;
   }).join('');
 
@@ -584,11 +612,13 @@ function applyFilters() {
   const minScore= parseInt(document.getElementById('filter-score').value) || 0;
   const deadline= document.getElementById('filter-deadline').value;
   const emailF  = document.getElementById('filter-email').value;
+  const sourceF = document.getElementById('filter-source').value;
 
   filtered = allData.filter(r => {
     if (country && r.buyer_country !== country) return false;
     if (parseInt(r.priority_score || 0) < minScore) return false;
     if (emailF === 'yes' && !r.buyer_email) return false;
+    if (sourceF && r.source !== sourceF) return false;
 
     if (deadline === 'active') {
       if (!r.deadline_date || parseInt(r.days_until_deadline) < 0) return false;
@@ -628,6 +658,7 @@ function resetFilters() {
   document.getElementById('filter-score').value = '0';
   document.getElementById('filter-deadline').value = '';
   document.getElementById('filter-email').value = '';
+  document.getElementById('filter-source').value = '';
   applyFilters();
 }
 
@@ -636,7 +667,7 @@ function exportCSV() {
   if (!filtered.length) return;
   const cols = ['tender_id','publication_number','title','buyer_name','buyer_country',
     'buyer_email','cpv_codes','keyword_match','estimated_value_eur','deadline_date',
-    'days_until_deadline','publication_date','priority_score','ted_url'];
+    'days_until_deadline','publication_date','priority_score','source','ted_url'];
   const rows = [cols.join(',')];
   filtered.forEach(r => {
     rows.push(cols.map(c => {
@@ -777,7 +808,7 @@ window.addEventListener('resize', () => {
 });
 
 // ── Event listeners ───────────────────────────────────────────────────────────
-['search','filter-country','filter-score','filter-deadline','filter-email'].forEach(id => {
+['search','filter-country','filter-score','filter-deadline','filter-email','filter-source'].forEach(id => {
   const el = document.getElementById(id);
   if (el) { el.addEventListener('input', applyFilters); el.addEventListener('change', applyFilters); }
 });
