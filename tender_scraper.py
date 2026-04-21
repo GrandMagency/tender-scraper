@@ -57,6 +57,15 @@ SOLAR_KEYWORDS = [
     "Überdachung Photovoltaik", "Parkplatz Solar",
 ]
 
+# Ширші ключові слова для bund.de (RSS не має CPV-фільтру)
+BUND_KEYWORDS = SOLAR_KEYWORDS + [
+    "PV-Anlage", "PV Anlage",
+    "Photovoltaik", "Photovoltaikanlage",
+    "Solaranlage", "Solarenergie",
+    "Photovoltaik-Anlage",
+    "Dachbegrünung Photovoltaik",
+]
+
 # CPV-коди для solar/carport (префікси)
 SOLAR_CPV_PREFIXES = {
     "09331200": "Solar photovoltaic modules",
@@ -606,9 +615,9 @@ def search_bund_de(days: int, verbose: bool = True):
         description = (item.findtext("description") or "").strip()
         guid        = (item.findtext("guid") or link).strip()
 
-        # Фільтр по solar keywords
+        # Фільтр по solar keywords (bund.de використовує ширший список)
         search_text = (title + " " + _strip_html(description)).lower()
-        keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+        keywords_found = [kw for kw in BUND_KEYWORDS if kw.lower() in search_text]
         if not keywords_found:
             continue
 
