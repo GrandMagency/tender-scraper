@@ -101,12 +101,16 @@ BUND_RSS_URL = (
     "RSSFeed/RSSGenerator_Ausschreibungen.xml"
 )
 
-# ── simap.ch (Швейцарія) ────────────────────────────────────────────────────────
-SIMAP_SEARCH_BASE  = "https://www.simap.ch/shabforms/COMMON/search/searchAtom.html"
+# ── simap.ch (Швейцарія) — REST API (знайдено через DevTools 2026-04-21) ────────
+SIMAP_API_URL = "https://www.simap.ch/rest/publications/v2/project/project-search"
+# Примітка: "solarcarport" (1 слово) → 0 результатів у базі; "solar carport" (2 слова) → є
 SIMAP_SEARCH_TERMS = [
-    "Solarcarport", "Solar Carport", "PV Carport",
-    "Carport Photovoltaik",
-    "Parkplatz Photovoltaik", "Parkhaus Solar",
+    "solar carport",
+    "carport",
+    "photovoltaik carport",
+    "parkplatz photovoltaik",
+    "parkhaus solar",
+    "überdachung photovoltaik",
 ]
 
 # ── vergabe.nrw.de (NRW, Німеччина) ────────────────────────────────────────────
@@ -712,85 +716,129 @@ def process_bund_item(item: dict, seen_ids: set, state: dict,
 
 def search_simap_ch(days: int, verbose: bool = True):
     """
-    Generator: пошук тендерів на simap.ch за ключовими словами.
-    Робить окремий запит для кожного search term, дедуплікує по entry ID.
+    Generator: пошук тендерів на simap.ch через REST JSON API.
+    Endpoint: GET /rest/publications/v2/project/project-search
+    Пагінація через cursor (pagination.lastItem → параметр after).
     """
     if verbose:
         print(f"\n[simap.ch] Пошук ({days}д, {len(SIMAP_SEARCH_TERMS)} terms)...")
 
-    cutoff       = date.today() - timedelta(days=days)
-    seen_guids: set[str] = set()
-    yielded      = 0
-    NS           = "http://www.w3.org/2005/Atom"
+    cutoff: date = date.today() - timedelta(days=days)
+    seen_ids: set[str] = set()
+    yielded = 0
 
     for term in SIMAP_SEARCH_TERMS:
-        params = urllib.parse.urlencode({"LANG": "de", "NOTICE_TITLE": term})
-        url    = f"{SIMAP_SEARCH_BASE}?{params}"
-        req    = urllib.request.Request(
-            url, headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read()
-        except Exception as e:
-            if verbose:
-                print(f"  [{term}] помилка: {e}")
-            continue
+        params_base = [
+            ("search", term),
+            ("lang", "de"),
+            ("lang", "fr"),
+            ("lang", "it"),
+            ("lang", "en"),
+            ("orderAddressCountryOnlySwitzerland", "true"),
+        ]
 
-        try:
-            root = ET.fromstring(raw)
-        except Exception as e:
-            if verbose:
-                print(f"  [{term}] XML parse error: {e}")
-            continue
+        after: str | None = None
 
-        # Atom entries (з namespace або без)
-        entries = root.findall(f"{{{NS}}}entry") or root.findall(".//entry")
+        while True:
+            params = params_base.copy()
+            if after:
+                params.append(("after", after))
 
-        for entry in entries:
-            def _at(tag: str) -> str:
-                return (
-                    entry.findtext(f"{{{NS}}}{tag}") or
-                    entry.findtext(tag) or ""
+            url = f"{SIMAP_API_URL}?{urllib.parse.urlencode(params)}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+                    "Referer": "https://www.simap.ch/",
+                },
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read())
+            except Exception as e:
+                if verbose:
+                    print(f"  [{term}] помилка: {e}")
+                break
+
+            projects = data.get("projects", [])
+            if not projects:
+                break
+
+            for proj in projects:
+                proj_id = proj.get("id", "")
+                if not proj_id or proj_id in seen_ids:
+                    continue
+                seen_ids.add(proj_id)
+
+                # Фільтр за датою
+                pub_date_str = proj.get("publicationDate", "")
+                pub_dt: date | None = None
+                try:
+                    pub_dt = datetime.strptime(pub_date_str[:10], "%Y-%m-%d").date()
+                    if pub_dt < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+                title_dict = proj.get("title", {}) or {}
+                title = (
+                    title_dict.get("de") or title_dict.get("fr") or
+                    title_dict.get("it") or title_dict.get("en") or ""
                 )
 
-            guid = _at("id")
-            if not guid or guid in seen_guids:
-                continue
-            seen_guids.add(guid)
+                proc_office = proj.get("procOfficeName", {}) or {}
+                buyer_name = (
+                    proc_office.get("de") or proc_office.get("fr") or
+                    proc_office.get("it") or ""
+                )
 
-            updated = _at("updated") or _at("published")
-            pub_dt: date | None = None
-            try:
-                pub_dt = datetime.fromisoformat(updated[:10]).date()
-                if pub_dt < cutoff:
+                address = proj.get("orderAddress", {}) or {}
+                country_id = address.get("countryId", "CH")
+                canton_id  = address.get("cantonId", "")
+                city_dict  = address.get("city", {}) or {}
+                city       = city_dict.get("de") or city_dict.get("fr") or ""
+
+                pub_number = proj.get("publicationNumber") or proj.get("projectNumber") or ""
+                pub_id     = proj.get("publicationId", proj_id)
+
+                # Фільтр за ключовими словами в заголовку
+                search_text = title.lower()
+                has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+                has_parking = any(t.lower()  in search_text for t  in PARKING_PV_TERMS)
+                has_solar   = any(t.lower()  in search_text for t  in SOLAR_TERMS)
+
+                if not (has_carport or (has_parking and has_solar)):
                     continue
-            except (ValueError, TypeError):
-                pass
 
-            title    = _at("title")
-            link_el  = entry.find(f"{{{NS}}}link") or entry.find("link")
-            link     = link_el.get("href", "") if link_el is not None else ""
-            summary  = _at("summary") or _at("content")
+                keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
 
-            search_text = (title + " " + _strip_html(summary)).lower()
-            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
-            has_parking = any(t.lower()  in search_text for t  in PARKING_PV_TERMS)
-            has_solar   = any(t.lower()  in search_text for t  in SOLAR_TERMS)
+                link = (
+                    f"https://www.simap.ch/simap/home/publications/tenders.html"
+                    f"?publicationId={pub_id}"
+                )
+                if city and canton_id:
+                    buyer_name = f"{buyer_name} ({city}, {canton_id})".strip(" (,)")
 
-            if not (has_carport or (has_parking and has_solar)):
-                continue
+                yielded += 1
+                yield {
+                    "title":          title[:300],
+                    "link":           link,
+                    "description":    "",
+                    "guid":           proj_id,
+                    "pub_dt":         pub_dt or date.today(),
+                    "buyer_name":     buyer_name,
+                    "pub_number":     pub_number,
+                    "country_id":     country_id,
+                    "keywords_found": keywords_found,
+                }
 
-            keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
-            yielded += 1
-            yield {
-                "title":          title[:300],
-                "link":           link,
-                "description":    summary,
-                "guid":           guid,
-                "pub_dt":         pub_dt or date.today(),
-                "keywords_found": keywords_found,
-            }
+            last_item = data.get("pagination", {}).get("lastItem", "")
+            if not last_item or last_item == after or len(projects) == 0:
+                break
+            after = last_item
+            time.sleep(0.5)
 
         time.sleep(0.5)
 
@@ -800,36 +848,33 @@ def search_simap_ch(days: int, verbose: bool = True):
 
 def process_simap_item(item: dict, seen_ids: set, state: dict,
                        min_score: int) -> dict | None:
-    """Нормалізує simap.ch Atom entry у стандартний tender record."""
-    slug      = item["guid"].rstrip("/").split("/")[-1].split("?")[0].replace(".html", "")
-    tender_id = f"simap_{slug}" if slug else f"simap_{abs(hash(item['guid'])) % 10**10}"
+    """Нормалізує simap.ch REST API project у стандартний tender record."""
+    guid      = item["guid"]
+    tender_id = f"simap_{guid.replace('-', '_')}" if guid else f"simap_{abs(hash(guid)) % 10**10}"
 
     if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
         return None
 
-    desc_plain   = _strip_html(item.get("description", ""))
-    desc_fields  = _parse_bund_description(item.get("description", ""))
-    buyer_name   = desc_fields.get("buyer", "")
-    deadline_raw = _extract_deadline_from_text(desc_plain)
-    deadline_iso, days_left = _parse_bund_date(deadline_raw)
-
-    score = 25 + score_tender([], item["keywords_found"], None, days_left)
+    # REST API не повертає дедлайн і бюджет у search endpoint
+    score = 25 + score_tender([], item["keywords_found"], None, None)
     score = min(score, 100)
     if score < min_score:
         return None
 
+    pub_number = item.get("pub_number", "") or tender_id
+
     return {
         "tender_id":           tender_id,
-        "publication_number":  slug or tender_id,
+        "publication_number":  pub_number,
         "title":               item["title"][:300],
-        "buyer_name":          buyer_name,
-        "buyer_country":       "CH",
+        "buyer_name":          item.get("buyer_name", ""),
+        "buyer_country":       item.get("country_id", "CH"),
         "buyer_email":         "",
         "cpv_codes":           "",
         "keyword_match":       ",".join(item["keywords_found"]),
         "estimated_value_eur": "",
-        "deadline_date":       deadline_iso,
-        "days_until_deadline": days_left if days_left is not None else "",
+        "deadline_date":       "",
+        "days_until_deadline": "",
         "publication_date":    item["pub_dt"].isoformat(),
         "priority_score":      score,
         "ted_url":             item["link"],
