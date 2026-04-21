@@ -531,6 +531,11 @@ def main():
         action="store_true",
         help="Показати запит без виконання",
     )
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Повернути всі тендери без перевірки state (для digest)",
+    )
     args = parser.parse_args()
 
     verbose = not args.quiet
@@ -578,7 +583,11 @@ def main():
             writer.writeheader()
 
     for notice in search_ted(countries, args.days, verbose=verbose):
-        record = process_notice(notice, seen_ids, state, args.min_score)
+        record = process_notice(
+            notice, seen_ids,
+            {} if args.no_dedup else state,
+            args.min_score,
+        )
         if record is None:
             continue
 
@@ -587,7 +596,8 @@ def main():
         csv_file.flush()
 
         seen_ids.add(record["tender_id"])
-        state["tenders"][record["tender_id"]] = record["publication_number"]
+        if not args.no_dedup:
+            state["tenders"][record["tender_id"]] = record["publication_number"]
         total_records += 1
 
         if verbose and total_records % 10 == 0:

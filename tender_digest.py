@@ -100,6 +100,7 @@ def run_scraper(region: str, days: int, min_score: int,
         "--days", str(days),
         "--min-score", str(min_score),
         "--no-telegram",
+        "--no-dedup",
         "--output", str(output),
     ]
     if quiet:
