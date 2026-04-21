@@ -98,6 +98,27 @@
   .btn.export { background: transparent; border: 1px solid #1a4a2a; color: #44cc77; }
   .btn.export:hover { background: #0a2a15; border-color: #44cc77; }
 
+  /* ── Days toggle ────────────────────────────────────────────────────── */
+  .days-toggle { display: flex; gap: 4px; align-self: flex-end; }
+  .days-btn {
+    background: transparent;
+    border: 1px solid #3a2a5a;
+    color: #888;
+    padding: 7px 14px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.15s;
+  }
+  .days-btn:hover { border-color: #A002B2; color: #ccc; }
+  .days-btn.active {
+    background: linear-gradient(135deg, #A002B2, #D946EF);
+    border-color: transparent;
+    color: #fff;
+  }
+
   /* ── Table ──────────────────────────────────────────────────────────── */
   .table-wrap { padding: 0 32px 32px; }
   table { width: 100%; border-collapse: collapse; margin-top: 16px; min-width: 1100px; }
@@ -388,6 +409,14 @@
       <option value="yes">Тільки з email</option>
     </select>
   </div>
+  <div class="filter-group">
+    <span class="filter-label">Діапазон</span>
+    <div class="days-toggle">
+      <button class="days-btn active" data-days="30" onclick="setDays(30)">30д</button>
+      <button class="days-btn" data-days="60" onclick="setDays(60)">60д</button>
+      <button class="days-btn" data-days="90" onclick="setDays(90)">90д</button>
+    </div>
+  </div>
   <button class="btn export" onclick="exportCSV()">⬇ Export CSV</button>
   <button class="btn secondary" onclick="resetFilters()">Скинути</button>
 </div>
@@ -436,6 +465,7 @@
 let allData = [];
 let filtered = [];
 let sortCol = 'priority_score';
+let activeDays = 30;
 let sortDir = 'desc';
 let page = 1;
 const PAGE_SIZE = 50;
@@ -605,6 +635,15 @@ function sortBy(col) {
   render();
 }
 
+// ── Days toggle ───────────────────────────────────────────────────────────────
+function setDays(n) {
+  activeDays = n;
+  document.querySelectorAll('.days-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.days) === n);
+  });
+  applyFilters();
+}
+
 // ── Filter ────────────────────────────────────────────────────────────────────
 function applyFilters() {
   const q       = document.getElementById('search').value.toLowerCase();
@@ -614,11 +653,16 @@ function applyFilters() {
   const emailF  = document.getElementById('filter-email').value;
   const sourceF = document.getElementById('filter-source').value;
 
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - activeDays);
+  const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
+
   filtered = allData.filter(r => {
     if (country && r.buyer_country !== country) return false;
     if (parseInt(r.priority_score || 0) < minScore) return false;
     if (emailF === 'yes' && !r.buyer_email) return false;
     if (sourceF && r.source !== sourceF) return false;
+    if (r.publication_date && r.publication_date < cutoffStr) return false;
 
     if (deadline === 'active') {
       if (!r.deadline_date || parseInt(r.days_until_deadline) < 0) return false;
