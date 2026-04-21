@@ -708,8 +708,8 @@ def main():
     parser.add_argument(
         "--min-score",
         type=int,
-        default=30,
-        help="Мінімальний пріоритет 0–100 (default: 30)",
+        default=20,
+        help="Мінімальний пріоритет 0–100 (default: 20)",
     )
     parser.add_argument(
         "--output",
