@@ -88,7 +88,6 @@ TED_FIELDS = [
     "estimated-value-lot",    # Бюджет (lot)
     "estimated-value-proc",   # Бюджет (procedure)
     "classification-cpv",     # CPV-коди (list)
-    "short-description",      # Короткий опис (multilingual) — для keyword match
     "notice-type",            # Тип тендера
 ]
 
@@ -394,11 +393,9 @@ def extract_cpv_codes(notice: dict) -> list[str]:
 
 
 def find_keywords(notice: dict) -> list[str]:
-    """Шукає SOLAR_KEYWORDS у назві + описі notice."""
+    """Шукає SOLAR_KEYWORDS у назві notice."""
     title = get_multilingual(notice.get("notice-title", ""), ("deu", "eng"))
-    desc  = get_multilingual(notice.get("short-description", ""), ("deu", "eng"))
-    text  = (title + " " + desc).lower()
-    return [kw for kw in SOLAR_KEYWORDS if kw.lower() in text]
+    return [kw for kw in SOLAR_KEYWORDS if kw.lower() in title.lower()]
 
 
 def ted_notice_url(pub_number: str) -> str:
@@ -442,8 +439,9 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
     # Keywords
     keywords_found = find_keywords(notice)
 
-    # TED query вже відфільтрував по keywords — але якщо все ж пусто, пропустити
-    if not keywords_found:
+    # TED query вже відфільтрував релевантні тендери (FT + title)
+    # keywords_found може бути пустим якщо match був у тілі документа (FT)
+    if not keywords_found and not cpv_codes:
         return None
 
     # Бюджет
