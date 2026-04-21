@@ -59,7 +59,11 @@ CARPORT_KEYWORDS = [
 ]
 
 # Група 2: паркінг + PV (Parkplatz + Photovoltaik/Solar/PV)
-PARKING_PV_TERMS = ["Parkplatz", "Parkhaus", "Stellplatz", "Parkdeck"]
+PARKING_PV_TERMS = [
+    "Parkplatz", "Parkhaus", "Stellplatz", "Parkdeck",
+    "Parkplatzüberdachung",   # дуже специфічний — уже означає "накриття паркінгу"
+    "Überdachung",            # "дах/навіс" — буде AND Solar у query
+]
 SOLAR_TERMS      = ["Photovoltaik", "Solar", "PV-Anlage"]
 
 # Для keyword_match та scoring: всі ключові слова разом
@@ -96,6 +100,17 @@ BUND_RSS_URL = (
     "https://www.service.bund.de/Content/Globals/Functions/"
     "RSSFeed/RSSGenerator_Ausschreibungen.xml"
 )
+
+# ── simap.ch (Швейцарія) ────────────────────────────────────────────────────────
+SIMAP_SEARCH_BASE  = "https://www.simap.ch/shabforms/COMMON/search/searchAtom.html"
+SIMAP_SEARCH_TERMS = [
+    "Solarcarport", "Solar Carport", "PV Carport",
+    "Carport Photovoltaik",
+    "Parkplatz Photovoltaik", "Parkhaus Solar",
+]
+
+# ── vergabe.nrw.de (NRW, Німеччина) ────────────────────────────────────────────
+VERGABE_NRW_RSS = "https://www.vergabe.nrw.de/rss.xml"
 
 # ── State-файл (dedup між запусками) ──────────────────────────────────────────
 STATE_FILE = Path(".state.json")
@@ -184,12 +199,12 @@ def build_query(countries: list[str], days: int) -> str:
       publication-date >= today(-N)  — відносна дата (N днів назад)
       AND / OR / NOT           — логічні оператори
     """
-    # Група 1: "Solarcarport" / "PV-Carport" в будь-якому полі (FT) —
-    #   хтось явно написав це слово в документі — найгарячіші ліди
+    # Група 1: явні терміни в будь-якому полі (FT) — найгарячіші ліди
     ft_carport = " OR ".join(f'FT ~ "{kw}"' for kw in [
         "Solarcarport", "Solar-Carport", "PV-Carport",
         "Carport Photovoltaik", "Photovoltaik Carport",
         "Solar Carport",
+        "Parkplatzüberdachung",    # дуже специфічний термін
     ])
 
     # Група 2: Carport + Solar в НАЗВІ тендера
@@ -197,7 +212,8 @@ def build_query(countries: list[str], days: int) -> str:
     title_solar   = " OR ".join(f'notice-title ~ "{t}"' for t in SOLAR_TERMS)
     title_carport_pv = f"({title_carport}) AND ({title_solar})"
 
-    # Група 3: Паркінг + PV в НАЗВІ (Parkplatz/Parkdeck AND Photovoltaik/Solar)
+    # Група 3: Паркінг/Дах + PV в НАЗВІ (термін AND Photovoltaik/Solar)
+    # Включає: Parkplatz, Parkplatzüberdachung, Überdachung + Solar
     title_parking    = " OR ".join(f'notice-title ~ "{t}"' for t in PARKING_PV_TERMS)
     title_parking_pv = f"({title_parking}) AND ({title_solar})"
 
@@ -567,9 +583,14 @@ def _parse_bund_date(raw: str) -> tuple[str, int | None]:
 
 def _bund_tender_id(guid: str) -> str:
     """Stable dedup ID з bund.de GUID."""
-    # GUID — URL виду https://www.service.bund.de/IMPORTE/Ausschreibungen/abc123.html
     slug = guid.rstrip("/").split("/")[-1].replace(".html", "")
     return f"bund_{slug}" if slug else f"bund_{abs(hash(guid)) % 10**10}"
+
+
+def _extract_deadline_from_text(text: str) -> str:
+    """Знаходить першу дату DD.MM.YYYY в тексті."""
+    m = re.search(r"\d{2}\.\d{2}\.\d{4}", text)
+    return m.group(0) if m else ""
 
 
 def search_bund_de(days: int, verbose: bool = True):
@@ -687,6 +708,248 @@ def process_bund_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── simap.ch (Швейцарія) ───────────────────────────────────────────────────────
+
+def search_simap_ch(days: int, verbose: bool = True):
+    """
+    Generator: пошук тендерів на simap.ch за ключовими словами.
+    Робить окремий запит для кожного search term, дедуплікує по entry ID.
+    """
+    if verbose:
+        print(f"\n[simap.ch] Пошук ({days}д, {len(SIMAP_SEARCH_TERMS)} terms)...")
+
+    cutoff       = date.today() - timedelta(days=days)
+    seen_guids: set[str] = set()
+    yielded      = 0
+    NS           = "http://www.w3.org/2005/Atom"
+
+    for term in SIMAP_SEARCH_TERMS:
+        params = urllib.parse.urlencode({"LANG": "de", "NOTICE_TITLE": term})
+        url    = f"{SIMAP_SEARCH_BASE}?{params}"
+        req    = urllib.request.Request(
+            url, headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+        except Exception as e:
+            if verbose:
+                print(f"  [{term}] помилка: {e}")
+            continue
+
+        try:
+            root = ET.fromstring(raw)
+        except Exception as e:
+            if verbose:
+                print(f"  [{term}] XML parse error: {e}")
+            continue
+
+        # Atom entries (з namespace або без)
+        entries = root.findall(f"{{{NS}}}entry") or root.findall(".//entry")
+
+        for entry in entries:
+            def _at(tag: str) -> str:
+                return (
+                    entry.findtext(f"{{{NS}}}{tag}") or
+                    entry.findtext(tag) or ""
+                )
+
+            guid = _at("id")
+            if not guid or guid in seen_guids:
+                continue
+            seen_guids.add(guid)
+
+            updated = _at("updated") or _at("published")
+            pub_dt: date | None = None
+            try:
+                pub_dt = datetime.fromisoformat(updated[:10]).date()
+                if pub_dt < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+            title    = _at("title")
+            link_el  = entry.find(f"{{{NS}}}link") or entry.find("link")
+            link     = link_el.get("href", "") if link_el is not None else ""
+            summary  = _at("summary") or _at("content")
+
+            search_text = (title + " " + _strip_html(summary)).lower()
+            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+            has_parking = any(t.lower()  in search_text for t  in PARKING_PV_TERMS)
+            has_solar   = any(t.lower()  in search_text for t  in SOLAR_TERMS)
+
+            if not (has_carport or (has_parking and has_solar)):
+                continue
+
+            keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+            yielded += 1
+            yield {
+                "title":          title[:300],
+                "link":           link,
+                "description":    summary,
+                "guid":           guid,
+                "pub_dt":         pub_dt or date.today(),
+                "keywords_found": keywords_found,
+            }
+
+        time.sleep(0.5)
+
+    if verbose:
+        print(f"  simap.ch: {yielded} релевантних тендерів")
+
+
+def process_simap_item(item: dict, seen_ids: set, state: dict,
+                       min_score: int) -> dict | None:
+    """Нормалізує simap.ch Atom entry у стандартний tender record."""
+    slug      = item["guid"].rstrip("/").split("/")[-1].split("?")[0].replace(".html", "")
+    tender_id = f"simap_{slug}" if slug else f"simap_{abs(hash(item['guid'])) % 10**10}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    desc_plain   = _strip_html(item.get("description", ""))
+    desc_fields  = _parse_bund_description(item.get("description", ""))
+    buyer_name   = desc_fields.get("buyer", "")
+    deadline_raw = _extract_deadline_from_text(desc_plain)
+    deadline_iso, days_left = _parse_bund_date(deadline_raw)
+
+    score = 25 + score_tender([], item["keywords_found"], None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  slug or tender_id,
+        "title":               item["title"][:300],
+        "buyer_name":          buyer_name,
+        "buyer_country":       "CH",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "simap.ch",
+    }
+
+
+# ── vergabe.nrw.de (NRW, найбільша земля DE) ───────────────────────────────────
+
+def search_vergabe_nrw(days: int, verbose: bool = True):
+    """
+    Generator: завантажує vergabe.nrw.de RSS і фільтрує за keywords (AND-логіка).
+    RSS містить останні ~100 оголошень; для historical > 30д результати обмежені.
+    """
+    if verbose:
+        print(f"\n[vergabe.nrw.de] Завантаження RSS ({days}д)...")
+
+    req = urllib.request.Request(
+        VERGABE_NRW_RSS,
+        headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+    except Exception as e:
+        if verbose:
+            print(f"  vergabe.nrw.de fetch error: {e}")
+        return
+
+    try:
+        root = ET.fromstring(raw)
+    except Exception as e:
+        if verbose:
+            print(f"  vergabe.nrw.de XML parse error: {e}")
+        return
+
+    cutoff = date.today() - timedelta(days=days)
+    items  = root.findall(".//item")
+
+    if verbose:
+        print(f"  {len(items)} items у фіді, фільтруємо...")
+
+    yielded = 0
+    for item in items:
+        pub_raw = item.findtext("pubDate", "")
+        pub_dt: date | None = None
+        try:
+            pub_dt = parsedate_to_datetime(pub_raw).date()
+            if pub_dt < cutoff:
+                continue
+        except Exception:
+            pass
+
+        title       = (item.findtext("title") or "").strip()
+        link        = (item.findtext("link") or "").strip()
+        description = (item.findtext("description") or "").strip()
+        guid        = (item.findtext("guid") or link).strip()
+
+        search_text = (title + " " + _strip_html(description)).lower()
+        has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+        has_parking = any(t.lower()  in search_text for t  in PARKING_PV_TERMS)
+        has_solar   = any(t.lower()  in search_text for t  in SOLAR_TERMS)
+
+        if not (has_carport or (has_parking and has_solar)):
+            continue
+
+        keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+        yielded += 1
+        yield {
+            "title":          title[:300],
+            "link":           link,
+            "description":    description,
+            "guid":           guid,
+            "pub_dt":         pub_dt or date.today(),
+            "keywords_found": keywords_found,
+        }
+
+    if verbose:
+        print(f"  vergabe.nrw.de: {yielded} релевантних items")
+
+
+def process_vergabe_item(item: dict, seen_ids: set, state: dict,
+                         min_score: int) -> dict | None:
+    """Нормалізує vergabe.nrw.de RSS item у стандартний tender record."""
+    slug      = item["guid"].rstrip("/").split("/")[-1].split("?")[0]
+    tender_id = f"nrw_{slug}" if slug else f"nrw_{abs(hash(item['guid'])) % 10**10}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    desc_plain   = _strip_html(item["description"])
+    desc_fields  = _parse_bund_description(item["description"])
+    buyer_name   = desc_fields.get("buyer", "")
+    deadline_raw = _extract_deadline_from_text(desc_plain)
+    deadline_iso, days_left = _parse_bund_date(deadline_raw)
+
+    score = 25 + score_tender([], item["keywords_found"], None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  slug or tender_id,
+        "title":               item["title"][:300],
+        "buyer_name":          buyer_name,
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "vergabe.nrw",
+    }
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -740,8 +1003,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund"],
-        help="Джерело: all (TED + Bund.de), ted, bund (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw"],
+        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw), ted, bund, simap, nrw (default: all)",
     )
     args = parser.parse_args()
 
@@ -756,10 +1019,21 @@ def main():
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Які джерела активні для цього регіону
+    active_sources: list[str] = []
+    if args.source in ("all", "ted"):
+        active_sources.append("TED")
+    if args.source in ("all", "bund") and region in ("DE", "DACH"):
+        active_sources.append("Bund.de")
+    if args.source in ("all", "simap") and region in ("CH", "DACH"):
+        active_sources.append("simap.ch")
+    if args.source in ("all", "nrw") and region in ("DE", "DACH"):
+        active_sources.append("vergabe.nrw")
+
     if verbose:
         print(f"\n📋 Tender Scraper — {region}")
         print(f"   Регіони: {', '.join(countries)}")
-        print(f"   Джерела: {args.source.upper()}")
+        print(f"   Джерела: {', '.join(active_sources)}")
         print(f"   Останні {args.days} днів")
         print(f"   Мін. score: {args.min_score}")
         print(f"   Вихід: {output_path}\n")
@@ -814,6 +1088,38 @@ def main():
     if args.source in ("all", "bund") and region in ("DE", "DACH"):
         for item in search_bund_de(args.days, verbose=verbose):
             record = process_bund_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── simap.ch (тільки для CH або DACH) ────────────────────────────────────────
+    if args.source in ("all", "simap") and region in ("CH", "DACH"):
+        for item in search_simap_ch(args.days, verbose=verbose):
+            record = process_simap_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── vergabe.nrw.de (тільки для DE або DACH) ──────────────────────────────────
+    if args.source in ("all", "nrw") and region in ("DE", "DACH"):
+        for item in search_vergabe_nrw(args.days, verbose=verbose):
+            record = process_vergabe_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
