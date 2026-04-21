@@ -460,9 +460,10 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
 
     # Score
     # TED query вже відфільтрував за релевантністю (FT + title match).
-    # Якщо немає keywords у заголовку і немає CPV → це FT-only match (keyword у тілі документа).
-    # Додаємо базовий бонус 15 щоб FT-ліди проходили фільтр min-score=20.
-    ft_base = 15 if (not keywords_found and not cpv_codes) else 0
+    # Якщо немає keywords у заголовку → FT-only match (keyword у тілі документа).
+    # Базовий бонус 15 гарантує що FT-ліди проходять min-score=20.
+    # Примітка: cpv_codes може бути непорожнім з нерелевантними кодами — не враховуємо.
+    ft_base = 15 if not keywords_found else 0
     priority_score = ft_base + score_tender(cpv_codes, keywords_found, value_eur, days_left)
 
     if priority_score < min_score:
