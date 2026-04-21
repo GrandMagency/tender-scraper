@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>📋 Tender Leads — Solar Carport DACH</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d0d1a;
+    color: #eeeeee;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 13px;
+    min-height: 100vh;
+    overflow-x: auto;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────── */
+  .header {
+    background: #141414;
+    border-bottom: 2px solid #A002B2;
+    padding: 14px 32px;
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 700;
+    background: linear-gradient(90deg, #A002B2, #D946EF);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .stats-bar { display: flex; gap: 28px; flex: 1; }
+  .stat { display: flex; flex-direction: column; gap: 3px; }
+  .stat-val { font-size: 17px; font-weight: 700; color: #fff; }
+  .stat-label { font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.8px; }
+
+  /* ── Controls ───────────────────────────────────────────────────────── */
+  .controls {
+    background: #1a1a2e;
+    border-bottom: 1px solid #2a2a4a;
+    padding: 12px 32px;
+    position: sticky;
+    top: 60px;
+    z-index: 50;
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+  .filter-group { display: flex; flex-direction: column; gap: 4px; }
+  .filter-label { color: #ccc; font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; }
+
+  input[type="text"], input[type="number"], select {
+    background: #0d0d1a;
+    border: 1px solid #3a2a5a;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 7px;
+    font-family: inherit;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input[type="text"] { width: 220px; }
+  input[type="number"] { width: 90px; }
+  select { min-width: 120px; }
+  input:focus, select:focus { border-color: #D946EF; box-shadow: 0 0 0 2px rgba(169,2,178,0.15); }
+  input::placeholder { color: #555; }
+  select option { background: #1a1a2e; }
+
+  .btn {
+    background: linear-gradient(135deg, #A002B2, #D946EF);
+    color: #fff;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    transition: opacity 0.2s;
+    align-self: flex-end;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn.secondary { background: transparent; border: 1px solid #3a2a5a; color: #ccc; }
+  .btn.secondary:hover { border-color: #D946EF; color: #fff; }
+  .btn.export { background: transparent; border: 1px solid #1a4a2a; color: #44cc77; }
+  .btn.export:hover { background: #0a2a15; border-color: #44cc77; }
+
+  /* ── Table ──────────────────────────────────────────────────────────── */
+  .table-wrap { padding: 0 32px 32px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; min-width: 1100px; }
+  thead th {
+    background: #1a1a2e;
+    color: #ccc;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    padding: 11px 10px;
+    text-align: left;
+    border-bottom: 2px solid #A002B2;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    position: sticky;
+    top: var(--header-offset, 0px);
+    z-index: 10;
+  }
+  thead th:hover { color: #fff; background: #22223a; }
+  thead th.sorted-asc::after  { content: ' ↑'; color: #A002B2; }
+  thead th.sorted-desc::after { content: ' ↓'; color: #A002B2; }
+  thead th.no-sort { cursor: default; }
+  thead th.no-sort:hover { color: #ccc; background: #1a1a2e; }
+
+  tbody tr { border-bottom: 1px solid #1a1a2a; transition: background 0.1s; }
+  tbody tr:hover { background: #161626; }
+  td { padding: 8px 10px; vertical-align: middle; color: #eee; }
+
+  /* Score badge */
+  .score-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 38px;
+    height: 24px;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 0 7px;
+  }
+  .score-high   { background: #1a0a20; color: #D946EF; border: 1px solid #5a0a7a; }
+  .score-mid    { background: #0a1a30; color: #60a5fa; border: 1px solid #1a3a6a; }
+  .score-low    { background: #1a1a2e; color: #888; border: 1px solid #2a2a3e; }
+
+  /* Country flag cell */
+  td.country { font-size: 18px; text-align: center; }
+
+  /* Buyer name */
+  td.buyer { color: #fff; font-weight: 600; max-width: 180px; }
+  td.title-col { color: #ddd; max-width: 220px; font-size: 12px; }
+  td.budget { color: #D946EF; font-weight: 600; white-space: nowrap; }
+  td.deadline { color: #ddd; white-space: nowrap; }
+  td.days { font-weight: 600; }
+
+  .truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+
+  /* Days color */
+  .days-urgent  { color: #ff6b6b; }
+  .days-soon    { color: #fbbf24; }
+  .days-ok      { color: #4ade80; }
+  .days-none    { color: #555; }
+
+  /* Email link */
+  a.email-link {
+    color: #60a5fa;
+    text-decoration: none;
+    font-size: 11px;
+    padding: 2px 6px;
+    border: 1px solid #1a3a5a;
+    border-radius: 3px;
+    white-space: nowrap;
+    display: inline-block;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: all 0.15s;
+  }
+  a.email-link:hover { background: #1a3a5a; color: #fff; }
+
+  /* TED link */
+  a.ted-link {
+    color: #A002B2;
+    text-decoration: none;
+    font-size: 11px;
+    padding: 3px 8px;
+    border: 1px solid #3a0050;
+    border-radius: 4px;
+    white-space: nowrap;
+    display: inline-block;
+    transition: all 0.15s;
+  }
+  a.ted-link:hover { background: #A002B2; color: #fff; }
+
+  /* Keywords badge */
+  .kw-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    background: #1a0a20;
+    color: #cc44dd;
+    border: 1px solid #3a0a4a;
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── Pagination ─────────────────────────────────────────────────────── */
+  .pagination {
+    display: flex; align-items: center; gap: 8px;
+    padding: 14px 32px;
+    border-top: 1px solid #1e1e2e;
+    justify-content: space-between;
+  }
+  .page-info { color: #555; font-size: 11px; }
+  .page-btns { display: flex; gap: 6px; }
+  .page-btn {
+    background: #1a1a2e; border: 1px solid #2a2a3e; color: #aaa;
+    padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; transition: all 0.15s;
+  }
+  .page-btn:hover, .page-btn.active { border-color: #A002B2; color: #eee; }
+  .page-btn:disabled { opacity: 0.3; cursor: default; }
+
+  /* ── Loading / Drop ─────────────────────────────────────────────────── */
+  .loading { text-align: center; padding: 60px 32px; color: #aaa; }
+  .drop-zone {
+    border: 2px dashed #3a2a4a; border-radius: 16px; padding: 48px 32px;
+    margin: 32px auto; max-width: 480px; cursor: pointer; transition: all 0.2s; background: #0f0f1e;
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #A002B2; background: #140a1e; }
+  .drop-zone h2 { font-size: 15px; color: #eee; margin-bottom: 8px; }
+  .drop-zone p { font-size: 12px; color: #777; margin-bottom: 20px; }
+  .spinner {
+    width: 32px; height: 32px; border: 3px solid #2a2a2e; border-top-color: #A002B2;
+    border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .footer { text-align: center; padding: 20px; color: #333; font-size: 11px; border-top: 1px solid #1a1a2a; }
+
+  /* Mobile toggle */
+  .filter-toggle-btn {
+    display: none;
+    background: transparent;
+    border: 1px solid #3a2a5a;
+    color: #ccc;
+    padding: 6px 14px;
+    border-radius: 7px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.2s;
+    flex-shrink: 0;
+    align-self: center;
+  }
+  .filter-toggle-btn:hover, .filter-toggle-btn.open { border-color: #D946EF; color: #fff; }
+
+  @media (max-width: 768px) {
+    body { font-size: 12px; overflow-x: hidden; }
+    .header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      padding: 10px 14px;
+      gap: 6px 10px;
+    }
+    .header h1 { grid-column: 1; grid-row: 1; font-size: 14px; }
+    .filter-toggle-btn { grid-column: 2; grid-row: 1; display: block; }
+    .stats-bar {
+      grid-column: 1 / -1; grid-row: 2;
+      display: flex; flex-direction: row; gap: 0;
+      justify-content: space-between;
+      border-top: 1px solid #2a2a3a; padding-top: 8px;
+    }
+    .stat { flex: 1; }
+    .stat-val { font-size: 13px; }
+    .stat-label { font-size: 9px; }
+    .controls-hidden-mobile { display: none !important; }
+    .controls { padding: 12px 14px; top: 0; }
+    .filter-group { width: calc(50% - 6px); }
+    input[type="text"] { width: 100%; }
+    select { min-width: 0; width: 100%; }
+    .table-wrap {
+      height: calc(100dvh - var(--above-table-h, 120px));
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 0;
+    }
+    table { font-size: 11px; min-width: 900px; }
+    td, thead th { padding: 7px 8px; }
+    thead th { top: 0 !important; }
+    .pagination { padding: 10px 14px; flex-wrap: wrap; gap: 6px; }
+    .page-btns { flex-wrap: wrap; }
+    .page-btn { padding: 4px 8px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<div class="header">
+  <h1>📋 Tender Leads — Solar Carport DACH</h1>
+  <button class="filter-toggle-btn" id="filter-toggle" onclick="toggleFilters()">Фільтри ▼</button>
+  <div class="stats-bar">
+    <div class="stat">
+      <span class="stat-val" id="stat-total">—</span>
+      <span class="stat-label">Тендерів</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" id="stat-filtered">—</span>
+      <span class="stat-label">Відфільтровано</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" id="stat-with-email">—</span>
+      <span class="stat-label">З email</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" id="stat-avg-score">—</span>
+      <span class="stat-label">Сер. score</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" id="stat-updated">—</span>
+      <span class="stat-label">Оновлено</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Controls ────────────────────────────────────────────────────────────── -->
+<div class="controls" id="controls">
+  <div class="filter-group">
+    <span class="filter-label">Пошук</span>
+    <input type="text" id="search" placeholder="Назва, замовник, email…">
+  </div>
+  <div class="filter-group">
+    <span class="filter-label">Країна</span>
+    <select id="filter-country">
+      <option value="">Всі (DACH)</option>
+      <option value="DE">🇩🇪 Німеччина</option>
+      <option value="AT">🇦🇹 Австрія</option>
+      <option value="CH">🇨🇭 Швейцарія</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <span class="filter-label">Мін. Score</span>
+    <input type="number" id="filter-score" value="0" min="0" max="100" step="5">
+  </div>
+  <div class="filter-group">
+    <span class="filter-label">Дедлайн</span>
+    <select id="filter-deadline">
+      <option value="">Всі</option>
+      <option value="active">Активні (є дедлайн)</option>
+      <option value="10">≤ 10 днів</option>
+      <option value="30">≤ 30 днів</option>
+      <option value="60">≤ 60 днів</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <span class="filter-label">Email</span>
+    <select id="filter-email">
+      <option value="">Всі</option>
+      <option value="yes">Тільки з email</option>
+    </select>
+  </div>
+  <button class="btn export" onclick="exportCSV()">⬇ Export CSV</button>
+  <button class="btn secondary" onclick="resetFilters()">Скинути</button>
+</div>
+
+<!-- ── Table ───────────────────────────────────────────────────────────────── -->
+<div class="table-wrap">
+  <div class="loading" id="loading">
+    <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+      <div class="spinner" id="auto-spinner"></div>
+      <p style="color:#aaa;margin-bottom:8px" id="auto-status">Завантаження даних…</p>
+      <div style="opacity:0.35;font-size:11px;color:#666">або перетягни CSV вручну</div>
+    </div>
+    <input type="file" id="file-input" accept=".csv" style="display:none">
+  </div>
+
+  <table id="table" style="display:none">
+    <thead>
+      <tr>
+        <th onclick="sortBy('priority_score')">Score</th>
+        <th class="no-sort">Країна</th>
+        <th onclick="sortBy('buyer_name')">Замовник</th>
+        <th onclick="sortBy('title')">Тендер</th>
+        <th onclick="sortBy('estimated_value_eur')">Бюджет</th>
+        <th onclick="sortBy('deadline_date')">Дедлайн</th>
+        <th onclick="sortBy('days_until_deadline')">Днів</th>
+        <th class="no-sort">Email</th>
+        <th class="no-sort">Ключ. слова</th>
+        <th class="no-sort">TED</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<!-- ── Pagination ──────────────────────────────────────────────────────────── -->
+<div class="pagination" id="pagination" style="display:none">
+  <span class="page-info" id="page-info"></span>
+  <div class="page-btns" id="page-btns"></div>
+</div>
+
+<div class="footer">GrandMa Agency · grandma.agency · Джерело: TED — Tenders Electronic Daily (ted.europa.eu)</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let allData = [];
+let filtered = [];
+let sortCol = 'priority_score';
+let sortDir = 'desc';
+let page = 1;
+const PAGE_SIZE = 50;
+
+// ── Country flags ─────────────────────────────────────────────────────────────
+const FLAG = { DE: '🇩🇪', AT: '🇦🇹', CH: '🇨🇭' };
+
+// ── CSV parser (RFC 4180-ish) ─────────────────────────────────────────────────
+function parseCSV(text) {
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  if (lines.length < 2) return [];
+  const headers = splitCSVLine(lines[0]);
+  const result = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const cols = splitCSVLine(lines[i]);
+    const row = {};
+    headers.forEach((h, idx) => { row[h.trim()] = (cols[idx] || '').trim(); });
+    result.push(row);
+  }
+  return result;
+}
+
+function splitCSVLine(line) {
+  const result = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
+      else inQ = !inQ;
+    } else if (c === ',' && !inQ) {
+      result.push(cur); cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  result.push(cur);
+  return result;
+}
+
+// ── Formatting helpers ────────────────────────────────────────────────────────
+function fmtBudget(v) {
+  const n = parseFloat(v);
+  if (!n || isNaN(n)) return '—';
+  if (n >= 1_000_000) return `€${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `€${Math.round(n / 1_000)}k`;
+  return `€${Math.round(n)}`;
+}
+
+function fmtDate(d) {
+  if (!d) return '—';
+  // YYYY-MM-DD → DD.MM.YYYY
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+  return d;
+}
+
+function daysClass(d) {
+  const n = parseInt(d);
+  if (isNaN(n) || n < 0) return 'days-none';
+  if (n <= 10) return 'days-urgent';
+  if (n <= 30) return 'days-soon';
+  return 'days-ok';
+}
+
+function scoreClass(s) {
+  const n = parseInt(s);
+  if (n >= 60) return 'score-high';
+  if (n >= 40) return 'score-mid';
+  return 'score-low';
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  const tbody = document.getElementById('tbody');
+  const start = (page - 1) * PAGE_SIZE;
+  const slice = filtered.slice(start, start + PAGE_SIZE);
+
+  tbody.innerHTML = slice.map(r => {
+    const score   = r.priority_score || '0';
+    const country = r.buyer_country || '';
+    const flag    = FLAG[country] || '🌍';
+    const buyer   = esc(r.buyer_name || '—');
+    const title   = esc(r.title || r.publication_number || '—');
+    const budget  = fmtBudget(r.estimated_value_eur);
+    const deadline= fmtDate(r.deadline_date);
+    const days    = r.days_until_deadline;
+    const dClass  = daysClass(days);
+    const daysStr = (days && parseInt(days) >= 0) ? days : '—';
+    const email   = r.buyer_email || '';
+    const kw      = r.keyword_match || '';
+    const tedUrl  = r.ted_url || '';
+
+    return `<tr>
+      <td><span class="score-badge ${scoreClass(score)}">${score}</span></td>
+      <td class="country">${flag}</td>
+      <td class="buyer"><span class="truncate" title="${buyer}">${buyer}</span></td>
+      <td class="title-col"><span class="truncate" title="${title}">${title}</span></td>
+      <td class="budget">${budget}</td>
+      <td class="deadline">${deadline}</td>
+      <td class="days ${dClass}">${daysStr}</td>
+      <td>${email ? `<a class="email-link" href="mailto:${esc(email)}" title="${esc(email)}">${esc(email)}</a>` : '<span style="color:#333">—</span>'}</td>
+      <td>${kw ? `<span class="kw-badge" title="${esc(kw)}">${esc(kw.split(',')[0])}</span>` : '<span style="color:#333">—</span>'}</td>
+      <td>${tedUrl ? `<a class="ted-link" href="${esc(tedUrl)}" target="_blank" rel="noopener">TED ↗</a>` : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  // Pagination
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  document.getElementById('page-info').textContent =
+    `${start + 1}–${Math.min(start + PAGE_SIZE, filtered.length)} з ${filtered.length.toLocaleString('uk')}`;
+
+  const btns = document.getElementById('page-btns');
+  btns.innerHTML = '';
+
+  const addBtn = (label, targetPage, disabled = false, active = false) => {
+    const b = document.createElement('button');
+    b.className = 'page-btn' + (active ? ' active' : '');
+    b.textContent = label;
+    b.disabled = disabled;
+    b.onclick = () => { page = targetPage; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+    btns.appendChild(b);
+  };
+
+  addBtn('«', 1, page === 1);
+  addBtn('‹', page - 1, page === 1);
+
+  const range = [];
+  for (let p = Math.max(1, page - 2); p <= Math.min(totalPages, page + 2); p++) range.push(p);
+  range.forEach(p => addBtn(p, p, false, p === page));
+
+  addBtn('›', page + 1, page === totalPages);
+  addBtn('»', totalPages, page === totalPages);
+
+  // Thead sort indicators
+  document.querySelectorAll('thead th').forEach(th => {
+    th.classList.remove('sorted-asc', 'sorted-desc');
+  });
+}
+
+// ── Sort ──────────────────────────────────────────────────────────────────────
+function sortBy(col) {
+  if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  else { sortCol = col; sortDir = 'desc'; }
+
+  const numCols = ['priority_score', 'estimated_value_eur', 'days_until_deadline'];
+  const isNum = numCols.includes(col);
+
+  filtered.sort((a, b) => {
+    let va = a[col] || '', vb = b[col] || '';
+    if (isNum) { va = parseFloat(va) || 0; vb = parseFloat(vb) || 0; }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  page = 1;
+  render();
+}
+
+// ── Filter ────────────────────────────────────────────────────────────────────
+function applyFilters() {
+  const q       = document.getElementById('search').value.toLowerCase();
+  const country = document.getElementById('filter-country').value;
+  const minScore= parseInt(document.getElementById('filter-score').value) || 0;
+  const deadline= document.getElementById('filter-deadline').value;
+  const emailF  = document.getElementById('filter-email').value;
+
+  filtered = allData.filter(r => {
+    if (country && r.buyer_country !== country) return false;
+    if (parseInt(r.priority_score || 0) < minScore) return false;
+    if (emailF === 'yes' && !r.buyer_email) return false;
+
+    if (deadline === 'active') {
+      if (!r.deadline_date || parseInt(r.days_until_deadline) < 0) return false;
+    } else if (deadline) {
+      const d = parseInt(r.days_until_deadline);
+      if (isNaN(d) || d < 0 || d > parseInt(deadline)) return false;
+    }
+
+    if (q) {
+      const hay = [r.buyer_name, r.title, r.buyer_email, r.keyword_match, r.publication_number]
+        .join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Sort
+  const numCols = ['priority_score', 'estimated_value_eur', 'days_until_deadline'];
+  const isNum = numCols.includes(sortCol);
+  filtered.sort((a, b) => {
+    let va = a[sortCol] || '', vb = b[sortCol] || '';
+    if (isNum) { va = parseFloat(va) || 0; vb = parseFloat(vb) || 0; }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  document.getElementById('stat-filtered').textContent = filtered.length.toLocaleString('uk');
+  page = 1;
+  render();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function resetFilters() {
+  document.getElementById('search').value = '';
+  document.getElementById('filter-country').value = '';
+  document.getElementById('filter-score').value = '0';
+  document.getElementById('filter-deadline').value = '';
+  document.getElementById('filter-email').value = '';
+  applyFilters();
+}
+
+// ── Export CSV ────────────────────────────────────────────────────────────────
+function exportCSV() {
+  if (!filtered.length) return;
+  const cols = ['tender_id','publication_number','title','buyer_name','buyer_country',
+    'buyer_email','cpv_codes','keyword_match','estimated_value_eur','deadline_date',
+    'days_until_deadline','publication_date','priority_score','ted_url'];
+  const rows = [cols.join(',')];
+  filtered.forEach(r => {
+    rows.push(cols.map(c => {
+      const v = r[c] || '';
+      return v.toString().includes(',') || v.toString().includes('"')
+        ? `"${v.replace(/"/g, '""')}"` : v;
+    }).join(','));
+  });
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `tenders_filtered_${filtered.length}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Load data ─────────────────────────────────────────────────────────────────
+function loadText(text) {
+  allData = parseCSV(text);
+  if (!allData.length) return;
+
+  const withEmail = allData.filter(r => r.buyer_email).length;
+  const scores    = allData.map(r => parseInt(r.priority_score) || 0);
+  const avgScore  = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+
+  // Latest publication date
+  const dates = allData.map(r => r.publication_date).filter(Boolean).sort();
+  const latestDate = dates.length ? fmtDate(dates[dates.length - 1]) : '—';
+
+  document.getElementById('stat-total').textContent     = allData.length.toLocaleString('uk');
+  document.getElementById('stat-with-email').textContent = withEmail.toLocaleString('uk');
+  document.getElementById('stat-avg-score').textContent  = avgScore;
+  document.getElementById('stat-updated').textContent    = latestDate;
+
+  document.getElementById('loading').style.display    = 'none';
+  document.getElementById('table').style.display      = 'table';
+  document.getElementById('pagination').style.display = 'flex';
+
+  setTimeout(updateStickyOffset, 50);
+  applyFilters();
+}
+
+// ── Auto-fetch ─────────────────────────────────────────────────────────────────
+(async () => {
+  const statusEl = document.getElementById('auto-status');
+  try {
+    const resp = await fetch('./tenders_dach_latest.csv');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const total  = parseInt(resp.headers.get('content-length') || '0');
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      if (total) statusEl.textContent = `Завантаження… ${Math.round(loaded / total * 100)}%`;
+    }
+    const text = new TextDecoder('utf-8').decode(
+      new Uint8Array(chunks.reduce((a, c) => [...a, ...c], []))
+    );
+    loadText(text);
+  } catch (e) {
+    document.getElementById('auto-spinner').style.display = 'none';
+    statusEl.textContent = '';
+    document.getElementById('drop-zone').innerHTML = `
+      <div style="font-size:40px;margin-bottom:12px">📋</div>
+      <h2>Відкрий CSV файл</h2>
+      <p>Перетягни <strong>tenders_dach_latest.csv</strong><br>або натисни щоб вибрати</p>
+      <button class="btn" style="pointer-events:none">Вибрати файл</button>`;
+  }
+})();
+
+// ── File input ────────────────────────────────────────────────────────────────
+document.getElementById('file-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById('drop-zone').innerHTML = '<div class="spinner"></div><p style="color:#aaa">Завантаження…</p>';
+  const reader = new FileReader();
+  reader.onload = ev => loadText(ev.target.result);
+  reader.readAsText(file, 'utf-8');
+});
+
+// ── Drag & drop ───────────────────────────────────────────────────────────────
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('drag-over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  dz.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  dz.innerHTML = '<div class="spinner"></div><p style="color:#aaa">Завантаження…</p>';
+  const reader = new FileReader();
+  reader.onload = ev => loadText(ev.target.result);
+  reader.readAsText(file, 'utf-8');
+});
+
+// ── Sticky offset ─────────────────────────────────────────────────────────────
+function updateStickyOffset() {
+  requestAnimationFrame(() => {
+    const headerH    = document.querySelector('.header')?.offsetHeight || 0;
+    const controlsEl = document.querySelector('.controls');
+    const hidden     = controlsEl?.classList.contains('controls-hidden-mobile');
+    const controlsH  = hidden ? 0 : (controlsEl?.offsetHeight || 0);
+    if (controlsEl) controlsEl.style.top = headerH + 'px';
+    const offset = headerH + controlsH;
+    document.documentElement.style.setProperty('--header-offset', offset + 'px');
+    if (window.innerWidth <= 768) {
+      const aboveTable = offset;
+      document.documentElement.style.setProperty('--above-table-h', aboveTable + 'px');
+    }
+  });
+}
+updateStickyOffset();
+window.addEventListener('resize', updateStickyOffset);
+window.addEventListener('load',   updateStickyOffset);
+
+// ── Mobile filter toggle ──────────────────────────────────────────────────────
+const isMobile = () => window.innerWidth <= 768;
+function toggleFilters() {
+  const ctrl = document.querySelector('.controls');
+  const btn  = document.getElementById('filter-toggle');
+  const hidden = ctrl.classList.toggle('controls-hidden-mobile');
+  btn.textContent = hidden ? 'Фільтри ▼' : 'Фільтри ▲';
+  btn.classList.toggle('open', !hidden);
+  setTimeout(updateStickyOffset, 50);
+}
+if (isMobile()) {
+  document.querySelector('.controls').classList.add('controls-hidden-mobile');
+  document.getElementById('filter-toggle').textContent = 'Фільтри ▼';
+}
+window.addEventListener('resize', () => {
+  if (!isMobile()) document.querySelector('.controls').classList.remove('controls-hidden-mobile');
+  updateStickyOffset();
+});
+
+// ── Event listeners ───────────────────────────────────────────────────────────
+['search','filter-country','filter-score','filter-deadline','filter-email'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) { el.addEventListener('input', applyFilters); el.addEventListener('change', applyFilters); }
+});
+</script>
+</body>
+</html>
