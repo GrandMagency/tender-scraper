@@ -438,7 +438,8 @@
   <div class="filter-group filter-group-days">
     <span class="filter-label">Діапазон</span>
     <div class="days-toggle">
-      <button class="days-btn active" data-days="30" onclick="setDays(30)">30д</button>
+      <button class="days-btn active" data-days="0" onclick="setDays(0)">Всі</button>
+      <button class="days-btn" data-days="30" onclick="setDays(30)">30д</button>
       <button class="days-btn" data-days="60" onclick="setDays(60)">60д</button>
       <button class="days-btn" data-days="90" onclick="setDays(90)">90д</button>
     </div>
@@ -491,7 +492,7 @@
 let allData = [];
 let filtered = [];
 let sortCol = 'priority_score';
-let activeDays = 30;
+let activeDays = 0;
 let sortDir = 'desc';
 let page = 1;
 const PAGE_SIZE = 50;
@@ -679,16 +680,19 @@ function applyFilters() {
   const emailF  = document.getElementById('filter-email').value;
   const sourceF = document.getElementById('filter-source').value;
 
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - activeDays);
-  const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
+  let cutoffStr = null;
+  if (activeDays > 0) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - activeDays);
+    cutoffStr = cutoff.toISOString().slice(0, 10);
+  }
 
   filtered = allData.filter(r => {
     if (country && r.buyer_country !== country) return false;
     if (parseInt(r.priority_score || 0) < minScore) return false;
     if (emailF === 'yes' && !r.buyer_email) return false;
     if (sourceF && r.source !== sourceF) return false;
-    if (r.publication_date && r.publication_date < cutoffStr) return false;
+    if (cutoffStr && r.publication_date && r.publication_date < cutoffStr) return false;
 
     if (deadline === 'active') {
       if (!r.deadline_date || parseInt(r.days_until_deadline) < 0) return false;
