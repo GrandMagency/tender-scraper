@@ -1,0 +1,3 @@
+# tender-scraper dependencies
+# Тільки stdlib — requests не потрібен (використовуємо urllib)
+# Якщо хочеш requests для зручності: pip install requests
