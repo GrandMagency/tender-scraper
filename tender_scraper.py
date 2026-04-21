@@ -648,7 +648,9 @@ def process_bund_item(item: dict, seen_ids: set, state: dict,
     deadline_iso, days_left = _parse_bund_date(desc_fields.get("deadline", ""))
 
     # Score: тільки keywords і дедлайн (CPV і бюджет недоступні з RSS)
-    score = score_tender([], item["keywords_found"], None, days_left)
+    # Базовий бонус 25 замість CPV — bund.de вже відфільтровано за solar keywords
+    score = 25 + score_tender([], item["keywords_found"], None, days_left)
+    score = min(score, 100)
     if score < min_score:
         return None
 
