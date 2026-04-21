@@ -226,6 +226,7 @@
   .src-TED     { background: #0a1a30; color: #60a5fa; border: 1px solid #1a3a6a; }
   .src-Bund    { background: #0e2a18; color: #4ade80; border: 1px solid #1a5a30; }
   .src-SIMAP   { background: #1a1a08; color: #facc15; border: 1px solid #4a4a10; }
+  .src-DAB     { background: #2a1a08; color: #fb923c; border: 1px solid #5a3010; }
 
   /* Keywords badge */
   .kw-badge {
@@ -425,7 +426,8 @@
       <option value="">Всі</option>
       <option value="TED">TED (EU)</option>
       <option value="Bund.de">Bund.de (DE)</option>
-      <option value="SIMAP">SIMAP (CH)</option>
+      <option value="simap.ch">simap.ch (CH)</option>
+      <option value="DAB.de">DAB.de (DE)</option>
     </select>
   </div>
   <div class="filter-group">
@@ -438,8 +440,7 @@
   <div class="filter-group filter-group-days">
     <span class="filter-label">Діапазон</span>
     <div class="days-toggle">
-      <button class="days-btn active" data-days="0" onclick="setDays(0)">Всі</button>
-      <button class="days-btn" data-days="30" onclick="setDays(30)">30д</button>
+      <button class="days-btn active" data-days="30" onclick="setDays(30)">30д</button>
       <button class="days-btn" data-days="60" onclick="setDays(60)">60д</button>
       <button class="days-btn" data-days="90" onclick="setDays(90)">90д</button>
     </div>
@@ -485,14 +486,14 @@
   <div class="page-btns" id="page-btns"></div>
 </div>
 
-<div class="footer">GrandMa Agency · grandma.agency · Джерело: TED — Tenders Electronic Daily (ted.europa.eu)</div>
+<div class="footer">GrandMa Agency · grandma.agency · Джерела: TED (ted.europa.eu) · Bund.de · simap.ch · DAB.de</div>
 
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 let allData = [];
 let filtered = [];
 let sortCol = 'priority_score';
-let activeDays = 0;
+let activeDays = 30;
 let sortDir = 'desc';
 let page = 1;
 const PAGE_SIZE = 50;
@@ -591,8 +592,8 @@ function render() {
     const kw      = r.keyword_match || '';
     const tedUrl  = r.ted_url || '';
     const source  = r.source || 'TED';
-    const srcKey  = source.split('.')[0]; // "Bund.de" → "Bund"
-    const linkLabel = source === 'Bund.de' ? 'Bund ↗' : source === 'SIMAP' ? 'SIMAP ↗' : 'TED ↗';
+    const _srcKeys = {'TED':'TED','Bund.de':'Bund','simap.ch':'SIMAP','DAB.de':'DAB'}; const srcKey = _srcKeys[source] || source.split('.')[0];
+    const _labels = {'TED':'TED ↗','Bund.de':'Bund ↗','simap.ch':'SIMAP ↗','DAB.de':'DAB ↗'}; const linkLabel = _labels[source] || (source + ' ↗');
 
     return `<tr>
       <td><span class="score-badge ${scoreClass(score)}">${score}</span></td>
@@ -680,19 +681,16 @@ function applyFilters() {
   const emailF  = document.getElementById('filter-email').value;
   const sourceF = document.getElementById('filter-source').value;
 
-  let cutoffStr = null;
-  if (activeDays > 0) {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - activeDays);
-    cutoffStr = cutoff.toISOString().slice(0, 10);
-  }
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - activeDays);
+  const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
 
   filtered = allData.filter(r => {
     if (country && r.buyer_country !== country) return false;
     if (parseInt(r.priority_score || 0) < minScore) return false;
     if (emailF === 'yes' && !r.buyer_email) return false;
     if (sourceF && r.source !== sourceF) return false;
-    if (cutoffStr && r.publication_date && r.publication_date < cutoffStr) return false;
+    if (r.publication_date && r.publication_date < cutoffStr) return false;
 
     if (deadline === 'active') {
       if (!r.deadline_date || parseInt(r.days_until_deadline) < 0) return false;
