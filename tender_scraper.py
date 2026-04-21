@@ -48,32 +48,32 @@ REGION_TO_COUNTRIES = {
 COUNTRY_ALPHA2 = {"DEU": "DE", "AUT": "AT", "CHE": "CH"}
 
 # ── Ключові слова для solar carport ───────────────────────────────────────────
-SOLAR_KEYWORDS = [
-    "Solarcarport", "Solar-Carport", "Solar Carport",
-    "PV-Carport", "PV Carport",
-    "Photovoltaik Carport", "Photovoltaik-Carport",
-    "Solardach Parkplatz", "Solardach-Parkplatz",
-    "Carport photovoltaik", "Carport PV",
-    "Überdachung Photovoltaik", "Parkplatz Solar",
+# TED API query: оператор ~ шукає підрядок у notice-title
+# Перевірено: "Solarcarport", "Carport" (з AND Solar), "Parkplatz" (з AND PV) — дають результати
+
+# Група 1: явний "Carport" в назві
+CARPORT_KEYWORDS = [
+    "Solarcarport", "Solar-Carport",
+    "PV-Carport",
+    "Carport",          # буде зʼєднано AND з PV у query
 ]
 
-# Ширші ключові слова для bund.de (RSS не має CPV-фільтру)
-BUND_KEYWORDS = SOLAR_KEYWORDS + [
-    "PV-Anlage", "PV Anlage",
-    "Photovoltaik", "Photovoltaikanlage",
-    "Solaranlage", "Solarenergie",
-    "Photovoltaik-Anlage",
-    "Dachbegrünung Photovoltaik",
-]
+# Група 2: паркінг + PV (Parkplatz + Photovoltaik/Solar/PV)
+PARKING_PV_TERMS = ["Parkplatz", "Parkhaus", "Stellplatz", "Parkdeck"]
+SOLAR_TERMS      = ["Photovoltaik", "Solar", "PV-Anlage"]
 
-# CPV-коди для solar/carport (префікси)
+# Для keyword_match та scoring: всі ключові слова разом
+SOLAR_KEYWORDS = CARPORT_KEYWORDS + PARKING_PV_TERMS + SOLAR_TERMS
+
+# CPV тільки для скорингу (не для query)
 SOLAR_CPV_PREFIXES = {
     "09331200": "Solar photovoltaic modules",
     "09332000": "Solar installation",
     "45261215": "Solar panel roof-covering work",
-    "44211000": "Prefabricated structures",
-    "45223820": "Pre-fabricated units",
 }
+
+# bund.de: ті самі групи
+BUND_KEYWORDS = SOLAR_KEYWORDS
 
 # ── TED API fields для запиту ──────────────────────────────────────────────────
 TED_FIELDS = [
@@ -184,23 +184,20 @@ def build_query(countries: list[str], days: int) -> str:
       publication-date >= today(-N)  — відносна дата (N днів назад)
       AND / OR / NOT           — логічні оператори
     """
-    # Ключові слова в назві тендера
-    kw_parts = " OR ".join(f'notice-title ~ "{kw}"' for kw in SOLAR_KEYWORDS)
+    # Група 1: явний carport у назві
+    carport_part = " OR ".join(f'notice-title ~ "{kw}"' for kw in CARPORT_KEYWORDS)
 
-    # CPV codes (direct match, без ~)
-    cpv_parts = " OR ".join(
-        f"classification-cpv IN ({code})"
-        for code in SOLAR_CPV_PREFIXES
-    )
+    # Група 2: паркінг + PV (Parkplatz/Parkhaus AND Photovoltaik/Solar)
+    parking_or  = " OR ".join(f'notice-title ~ "{t}"' for t in PARKING_PV_TERMS)
+    solar_or    = " OR ".join(f'notice-title ~ "{t}"' for t in SOLAR_TERMS)
+    parking_pv_part = f"({parking_or}) AND ({solar_or})"
 
-    # Країни
+    # Країни і дата
     country_parts = " OR ".join(f"buyer-country IN ({c})" for c in countries)
-
-    # Дата (TED підтримує today(-N) або YYYYMMDD)
-    date_filter = f"publication-date >= today(-{days})"
+    date_filter   = f"publication-date >= today(-{days})"
 
     query = (
-        f"({kw_parts} OR {cpv_parts})"
+        f"({carport_part} OR ({parking_pv_part}))"
         f" AND ({country_parts})"
         f" AND {date_filter}"
     )
@@ -434,8 +431,8 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
     # Keywords
     keywords_found = find_keywords(notice)
 
-    # Якщо нічого релевантного — пропустити
-    if not cpv_codes and not keywords_found:
+    # TED query вже відфільтрував по keywords — але якщо все ж пусто, пропустити
+    if not keywords_found:
         return None
 
     # Бюджет
@@ -690,8 +687,8 @@ def main():
     parser.add_argument(
         "--days",
         type=int,
-        default=7,
-        help="Кількість днів назад для пошуку (default: 7)",
+        default=365,
+        help="Кількість днів назад для пошуку (default: 365)",
     )
     parser.add_argument(
         "--min-score",
