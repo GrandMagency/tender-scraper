@@ -1731,24 +1731,26 @@ def run_health_check(sources: list[str] | None = None) -> None:
                 detail = f"{len(zf.namelist())} files"
 
             else:
-                # Generic check — just verify connectivity via socket
-                import socket
-                portal_domains = {
-                    "simap": "www.simap.ch",
-                    "nrw": "www.vergabe.nrw.de",
-                    "dab": "www.deutsches-ausschreibungsblatt.de",
-                    "bescha": "www.bescha.bund.de",
-                    "nrw-open": "open.nrw",
+                # Generic check — HTTP HEAD request (надійніше ніж raw socket)
+                portal_urls = {
+                    "simap": "https://www.simap.ch",
+                    "nrw": "https://www.vergabe.nrw.de",
+                    "dab": "https://www.deutsches-ausschreibungsblatt.de",
+                    "bescha": "https://www.bescha.bund.de",
+                    "nrw-open": "https://open.nrw",
                 }
-                domain = portal_domains.get(source_key, "example.com")
+                url = portal_urls.get(source_key, "https://example.com")
+                req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "WAT-tender-scraper/1.0"})
                 try:
-                    sock = socket.create_connection((domain, 443), timeout=5)
-                    sock.close()
-                    ok = True
-                    detail = "connection OK"
-                except socket.error:
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        ok = r.status < 500
+                        detail = f"HTTP {r.status}"
+                except urllib.error.HTTPError as e:
+                    ok = e.code < 500
+                    detail = f"HTTP {e.code}"
+                except Exception as e:
                     ok = False
-                    detail = "socket error"
+                    detail = str(e)[:30]
 
         except Exception as e:
             ok = False
