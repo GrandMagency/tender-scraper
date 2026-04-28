@@ -333,11 +333,25 @@ def fetch_page(payload: dict, verbose: bool = False) -> dict | None:
     return None
 
 
-def search_ted(countries: list[str], days: int, verbose: bool = True):
+def build_cpv_query(countries: list[str], days: int) -> str:
+    """
+    Другий TED запит — по специфічних solar CPV кодах.
+    Знаходить тендери де 'solar' немає в назві, але CPV вказує на сонячну енергетику.
+    Тільки high-confidence solar CPVs (не 45213312 — занадто широкий).
+    """
+    solar_cpvs = ["09331200", "09332000", "45261215"]  # PV modules, solar install, solar roof
+    cpv_parts = " OR ".join(f"classification-cpv IN ({cpv})" for cpv in solar_cpvs)
+    country_parts = " OR ".join(f"buyer-country IN ({c})" for c in countries)
+    return f"({cpv_parts}) AND ({country_parts}) AND publication-date >= today(-{days})"
+
+
+def search_ted(countries: list[str], days: int, verbose: bool = True, *, query: str | None = None):
     """
     Генератор: пагінує TED API (page-based) і повертає notices по одному.
+    Якщо query передано явно — використовує його (для CPV-based пошуку).
     """
-    query = build_query(countries, days)
+    if query is None:
+        query = build_query(countries, days)
     page = 1
     total_seen = 0
     page_size = 100
@@ -1682,7 +1696,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
     Виводить таблицю статусу. Exit code 1 якщо є помилки.
     """
     if sources is None:
-        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "bescha", "nrw-open"]
+        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich"]
 
     results: dict[str, dict] = {}
     for s in sources:
@@ -1866,7 +1880,7 @@ def main():
     # Які джерела активні для цього регіону
     active_sources: list[str] = []
     if args.source in ("all", "ted"):
-        active_sources.append("TED")
+        active_sources.append("TED (keywords + CPV)")
     if args.source in ("all", "bund") and region in ("DE", "DACH"):
         active_sources.append("Bund.de")
     if args.source in ("all", "simap") and region in ("CH", "DACH"):
@@ -1924,6 +1938,25 @@ def main():
         if verbose:
             print("[TED] Пошук тендерів...")
         for notice in search_ted(countries, args.days, verbose=verbose):
+            record = process_notice(notice, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── TED (CPV-based — доповнює keyword пошук, дедуп автоматичний) ────────────────────
+    if args.source in ("all", "ted"):
+        cpv_q = build_cpv_query(countries, args.days)
+        if verbose:
+            print("[TED CPV] Пошук за CPV 09331200/09332000/45261215...")
+        for notice in search_ted(countries, args.days, verbose=verbose, query=cpv_q):
             record = process_notice(notice, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
@@ -2017,8 +2050,8 @@ def main():
             if verbose and total_records % 10 == 0:
                 print(f"  ✓ {total_records} тендерів записано...")
 
-    # ── bescha.bund.de (тільки для DE або DACH) ─────────────────────────────────────────
-    if args.source in ("all", "bescha") and region in ("DE", "DACH"):
+    # ── bescha.bund.de (тільки явний --source bescha; з "all" виключено — evergabe-online.de повертає HTTP 400) ──
+    if args.source == "bescha" and region in ("DE", "DACH"):
         for item in search_bescha_de(args.days, verbose=verbose):
             record = process_bescha_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
@@ -2033,8 +2066,8 @@ def main():
             if verbose and total_records % 10 == 0:
                 print(f"  ✓ {total_records} тендерів записано...")
 
-    # ── open.nrw (тільки для DE або DACH) ────────────────────────────────────────────────────
-    if args.source in ("all", "nrw-open") and region in ("DE", "DACH"):
+    # ── open.nrw (тільки явний --source nrw-open; з "all" виключено — CKAN XML endpoints повертають 404) ──
+    if args.source == "nrw-open" and region in ("DE", "DACH"):
         for item in search_open_nrw(args.days, verbose=verbose):
             record = process_open_nrw_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
