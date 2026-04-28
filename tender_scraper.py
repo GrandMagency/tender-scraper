@@ -55,6 +55,8 @@ COUNTRY_ALPHA2 = {"DEU": "DE", "AUT": "AT", "CHE": "CH"}
 CARPORT_KEYWORDS = [
     "Solarcarport", "Solar-Carport",
     "PV-Carport",
+    "Carport-PV-Anlage",                  # Photovoltaikanlage auf Carport
+    "Photovoltaik-Parkplatzüberdachung",  # compound form used by many municipalities
     "Carport",               # буде зʼєднано AND з PV у query
     "Parkplatzüberdachung",  # "накриття паркінгу" — настільки специфічний, що AND Solar не треба
 ]
@@ -111,10 +113,23 @@ SIMAP_SEARCH_TERMS = [
     "parkplatz photovoltaik",
     "parkhaus solar",
     "überdachung photovoltaik",
+    "carport pv anlage",  # simap needs space-separated terms
 ]
 
 # ── vergabe.nrw.de (NRW, Німеччина) ────────────────────────────────────────────
 VERGABE_NRW_RSS = "https://www.vergabe.nrw.de/rss.xml"
+
+# ── oeffentlichevergabe.de (Bekanntmachungsservice — Deutschland) ─────────────
+# OpenData API: daily ZIP export (notice.csv + purpose.csv + organisation.csv + classification.csv)
+# Free, no auth. ~80–150 KB/day, ~120–200 notices/day (all German federal/state notices).
+# Джерела покрити: service.bund.de/eVergabe (federal) + частина земель через Bekanntmachungsservice
+OEFFENTLICH_API_URL = "https://oeffentlichevergabe.de/api/notice-exports"
+# Максимальна кількість днів для bulk download (щоб не перевантажити API)
+OEFFENTLICH_MAX_DAYS = 30
+
+# Підписки / закриті портали — не реалізуємо:
+# ibau, subreport ELViS, B_I MEDIEN, Vergabe24, TenderRadar, TenderPipe,
+# TendersOnTime, DTVP (тільки email-нотифікація), evergabe.de (реєстрація)
 
 # ── deutsches-ausschreibungsblatt.de (DE, знайдено через DevTools 2026-04-21) ──
 DAB_SEARCH_URL = (
@@ -130,6 +145,9 @@ DAB_SEARCH_TERMS = [
     "parkplatz photovoltaik",
     "parkhaus solar",
     "parkplatzüberdachung",
+    "carport pv-anlage",                  # Carport-PV-Anlage variant
+    "photovoltaik parkplatzüberdachung",  # Photovoltaik-Parkplatzüberdachung variant
+    "parkplatzüberdachung pv-anlage",     # explicit combo
 ]
 # vergabetyp: 1=Ausschreibung (активний), 2=Vergabe (в процесі), 3=Vergebener Auftrag (виданий)
 DAB_VERGABETYP_LABELS = {1: "Ausschreibung", 2: "Vergabe", 3: "Vergebener Auftrag"}
@@ -225,6 +243,9 @@ def build_query(countries: list[str], days: int) -> str:
     ft_carport = " OR ".join(f'FT ~ "{kw}"' for kw in [
         "Solarcarport", "Solar-Carport", "PV-Carport",
         "Carport Photovoltaik", "Photovoltaik Carport",
+        "Carport-PV-Anlage",                   # hyphenated compound
+        "Photovoltaik-Parkplatzüberdachung",   # hyphenated compound
+        "Parkplatzüberdachung mit PV-Anlage",  # explicit phrase
         "Solar Carport",
         "Parkplatzüberdachung",    # дуже специфічний термін
     ])
@@ -439,6 +460,11 @@ def find_keywords(notice: dict) -> list[str]:
 def ted_notice_url(pub_number: str) -> str:
     """URL на сторінку тендера."""
     return f"https://ted.europa.eu/en/notice/-/detail/{pub_number}"
+
+
+def oeffentlich_notice_url(notice_id: str) -> str:
+    """URL на сторінку оголошення oeffentlichevergabe.de."""
+    return f"https://oeffentlichevergabe.de/ui/de/bekanntmachung/notice/{notice_id}"
 
 
 def process_notice(notice: dict, seen_ids: set, state: dict,
@@ -1184,6 +1210,186 @@ def process_dab_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── oeffentlichevergabe.de (Bekanntmachungsservice) ───────────────────────────
+
+def search_oeffentlich_de(countries: list[str], days: int, verbose: bool = True):
+    """
+    Generator: завантажує денні ZIP з oeffentlichevergabe.de OpenData API,
+    фільтрує за keywords і країнами DACH.
+
+    API: GET /api/notice-exports?pubDay=YYYY-MM-DD&format=csv.zip
+    ZIP містить 15+ CSV (нормалізована структура eForms):
+      notice.csv         — основні поля (noticeIdentifier, noticeType, publicationDate)
+      purpose.csv        — заголовок, опис, бюджет на lot
+      organisation.csv   — buyer (organisationRole = "buyer")
+      classification.csv — CPV-коди
+
+    Обмеження: максимум OEFFENTLICH_MAX_DAYS днів (30) щоб не перевантажувати API.
+    """
+    import zipfile
+    import io as _io
+    import csv as csv_mod
+
+    if verbose:
+        print(f"\n[oeffentlichevergabe.de] Завантаження ({min(days, OEFFENTLICH_MAX_DAYS)}д)...")
+
+    today = date.today()
+    effective_days = min(days, OEFFENTLICH_MAX_DAYS)
+    yielded = 0
+
+    for d in range(1, effective_days + 1):
+        target_day = (today - timedelta(days=d)).strftime("%Y-%m-%d")
+        url = f"{OEFFENTLICH_API_URL}?pubDay={target_day}&format=csv.zip"
+
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+                    "Accept": "*/*",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                zip_data = resp.read()
+        except Exception as e:
+            if verbose and d == 1:
+                print(f"  [{target_day}] помилка: {e}")
+            continue
+
+        try:
+            zf = zipfile.ZipFile(_io.BytesIO(zip_data))
+        except Exception as e:
+            if verbose:
+                print(f"  [{target_day}] ZIP error: {e}")
+            continue
+
+        def _read_csv(name: str) -> list[dict]:
+            if name not in zf.namelist():
+                return []
+            with zf.open(name) as f:
+                content = f.read().decode("utf-8", errors="ignore")
+            return list(csv_mod.DictReader(_io.StringIO(content)))
+
+        # Завантажуємо потрібні таблиці
+        notice_map = {r["noticeIdentifier"]: r for r in _read_csv("notice.csv")}
+        classification_map = {r["noticeIdentifier"]: r for r in _read_csv("classification.csv")}
+
+        # Buyer lookup — беремо рядки де role = "buyer"
+        buyer_map: dict[str, dict] = {}
+        for org in _read_csv("organisation.csv"):
+            if org.get("organisationRole") == "buyer":
+                buyer_map[org["noticeIdentifier"]] = org
+
+        # Фільтруємо за країнами
+        country_notice_ids = {
+            nid for nid, org in buyer_map.items()
+            if org.get("organisationCountryCode", "") in countries
+        }
+
+        day_yielded = 0
+        for purpose in _read_csv("purpose.csv"):
+            nid = purpose.get("noticeIdentifier", "")
+            if not nid:
+                continue
+            # Фільтр за країною
+            if nid not in country_notice_ids:
+                continue
+
+            title = purpose.get("title", "")
+            description = purpose.get("description", "")
+            search_text = (title + " " + description).lower()
+
+            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+            has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+            has_solar = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+            if not (has_carport or (has_parking and has_solar)):
+                continue
+
+            keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+
+            org = buyer_map.get(nid, {})
+            cpv = classification_map.get(nid, {})
+            notice = notice_map.get(nid, {})
+
+            value_raw = purpose.get("estimatedValue", "")
+            try:
+                value_eur: float | None = float(value_raw) if value_raw else None
+            except (ValueError, TypeError):
+                value_eur = None
+
+            lot_id = purpose.get("lotIdentifier", "LOT-0000")
+            pub_date = notice.get("publicationDate", "")[:10]
+
+            day_yielded += 1
+            yielded += 1
+            yield {
+                "notice_id":      nid,
+                "lot_id":         lot_id,
+                "title":          title[:300],
+                "pub_date":       pub_date,
+                "notice_type":    notice.get("noticeType", ""),
+                "buyer_name":     org.get("organisationName", ""),
+                "buyer_country":  org.get("organisationCountryCode", ""),
+                "buyer_city":     org.get("organisationCity", ""),
+                "cpv_code":       cpv.get("mainClassificationCode", ""),
+                "value_eur":      value_eur,
+                "keywords_found": keywords_found,
+            }
+
+        if verbose:
+            print(f"  [{target_day}] {day_yielded} matches")
+
+        time.sleep(0.5)
+
+    if verbose:
+        print(f"  oeffentlichevergabe.de: {yielded} релевантних тендерів")
+
+
+def process_oeffentlich_item(item: dict, seen_ids: set, state: dict,
+                              min_score: int) -> dict | None:
+    """Нормалізує oeffentlichevergabe.de запис у стандартний tender record."""
+    nid = item["notice_id"]
+    lot_id = item.get("lot_id", "LOT-0000")
+    tender_id = f"oev_{nid.replace('-', '_')}_{lot_id.replace('-', '_')}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    cpv_code = item.get("cpv_code", "")
+    cpv_codes = [cpv_code] if cpv_code else []
+
+    score = score_tender(cpv_codes, item["keywords_found"], item.get("value_eur"), None)
+    if score < min_score:
+        return None
+
+    country_raw = item.get("buyer_country", "")
+    country_a2 = COUNTRY_ALPHA2.get(country_raw, country_raw[:2] if len(country_raw) >= 2 else "DE")
+
+    buyer = item.get("buyer_name", "")
+    city = item.get("buyer_city", "")
+    if city and city not in buyer:
+        buyer = f"{buyer} ({city})"
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  nid,
+        "title":               item["title"],
+        "buyer_name":          buyer,
+        "buyer_country":       country_a2,
+        "buyer_email":         "",
+        "cpv_codes":           cpv_code,
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": item.get("value_eur") or "",
+        "deadline_date":       "",
+        "days_until_deadline": "",
+        "publication_date":    item.get("pub_date", ""),
+        "priority_score":      score,
+        "ted_url":             oeffentlich_notice_url(nid),
+        "source":              "oeffentlichevergabe.de",
+    }
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1237,8 +1443,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw", "dab"],
-        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de), ted, bund, simap, nrw, dab (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich"],
+        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de), ted, bund, simap, nrw, dab, oeffentlich (default: all)",
     )
     args = parser.parse_args()
 
@@ -1265,6 +1471,8 @@ def main():
         active_sources.append("vergabe.nrw")
     if args.source in ("all", "dab") and region in ("DE", "DACH"):
         active_sources.append("DAB.de")
+    if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
+        active_sources.append("oeffentlichevergabe.de")
 
     if verbose:
         print(f"\n📋 Tender Scraper — {region}")
@@ -1372,6 +1580,22 @@ def main():
     if args.source in ("all", "dab") and region in ("DE", "DACH"):
         for item in search_dab_de(args.days, verbose=verbose):
             record = process_dab_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── oeffentlichevergabe.de (тільки для DE або DACH) ─────────────────────────────────────────
+    if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
+        for item in search_oeffentlich_de(countries, args.days, verbose=verbose):
+            record = process_oeffentlich_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
