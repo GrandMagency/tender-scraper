@@ -284,14 +284,11 @@ def build_query(countries: list[str], days: int) -> str:
     country_parts = " OR ".join(f"buyer-country IN ({c})" for c in countries)
     date_filter   = f"publication-date >= today(-{days})"
 
-    # Prior Information Notices (PIN) + Contract Notices (CN) + Simplified Contract Notices (SCN)
-    notice_type_filter = '(notice-type IN ("CN") OR notice-type IN ("PIN-RTL") OR notice-type IN ("PIN") OR notice-type IN ("SCN"))'
-
+    # TED повертає всі типи оголошень (CN, PIN, SCN) за замовчуванням — фільтр notice-type не підтримується в DSL
     query = (
         f"({ft_carport} OR ({title_carport_pv}) OR ({title_parking_pv}))"
         f" AND ({country_parts})"
         f" AND {date_filter}"
-        f" AND {notice_type_filter}"
     )
     return query
 
