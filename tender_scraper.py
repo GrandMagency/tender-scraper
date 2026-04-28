@@ -499,7 +499,7 @@ def ted_notice_url(pub_number: str) -> str:
 
 def oeffentlich_notice_url(notice_id: str) -> str:
     """URL на сторінку оголошення oeffentlichevergabe.de."""
-    return f"https://oeffentlichevergabe.de/ui/de/bekanntmachung/notice/{notice_id}"
+    return f"https://oeffentlichevergabe.de/ui/de/notices/{notice_id}"
 
 
 def process_notice(notice: dict, seen_ids: set, state: dict,
