@@ -76,6 +76,11 @@ SOLAR_CPV_PREFIXES = {
     "09331200": "Solar photovoltaic modules",
     "09332000": "Solar installation",
     "45261215": "Solar panel roof-covering work",
+    "45213312": "Single storey car parks",
+    "45213200": "Parking facilities",
+    "45223200": "Structural work",
+    "45310000": "Electrical installation work",
+    "45315700": "Switching station fitting",
 }
 
 # bund.de: ті самі групи
@@ -127,9 +132,24 @@ OEFFENTLICH_API_URL = "https://oeffentlichevergabe.de/api/notice-exports"
 # Максимальна кількість днів для bulk download (щоб не перевантажити API)
 OEFFENTLICH_MAX_DAYS = 30
 
+# ── open.nrw (NRW OpenData CKAN) ───────────────────────────────────────────────
+# Open.NRW publishes state procurement tenders as a public CKAN dataset
+OPEN_NRW_CKAN_URL = "https://open.nrw/api/3/action/package_show"
+OPEN_NRW_PACKAGE_ID = "ausschreibungen_des_vergabemarktplatzes_nrw_1587477165"
+
 # Підписки / закриті портали — не реалізуємо:
 # ibau, subreport ELViS, B_I MEDIEN, Vergabe24, TenderRadar, TenderPipe,
 # TendersOnTime, DTVP (тільки email-нотифікація), evergabe.de (реєстрація)
+
+# ── bescha.bund.de (Federal Procurement Office) ────────────────────────────────
+BESCHA_DOMAIN = "https://www.bescha.bund.de"
+# Спробуємо RSS URLs по порядку
+BESCHA_RSS_CANDIDATES = [
+    "https://www.bescha.bund.de/Shared/RSS/Vergabebekanntmachungen",
+    "https://www.bescha.bund.de/service/rss-feeds",
+    "https://www.bescha.bund.de/rss",
+]
+BESCHA_HTML_URL = "https://www.bescha.bund.de/DE/Vergaben/Ausschreibungen/ausschreibungen_node.html"
 
 # ── deutsches-ausschreibungsblatt.de (DE, знайдено через DevTools 2026-04-21) ──
 DAB_SEARCH_URL = (
@@ -191,7 +211,7 @@ def score_tender(cpv_codes: list[str], keywords_found: list[str],
     matched_cpv = [c for c in cpv_codes if any(c.startswith(p) for p in SOLAR_CPV_PREFIXES)]
     if matched_cpv:
         score += 40
-    elif any(c[:4] in ["0933", "4526", "4422", "4523"] for c in cpv_codes):
+    elif any(c[:4] in ["0933", "4526", "4422", "4523", "4521", "4522", "4531"] for c in cpv_codes):
         score += 25
 
     # Keyword-match (0–30)
@@ -264,10 +284,14 @@ def build_query(countries: list[str], days: int) -> str:
     country_parts = " OR ".join(f"buyer-country IN ({c})" for c in countries)
     date_filter   = f"publication-date >= today(-{days})"
 
+    # Prior Information Notices (PIN) + Contract Notices (CN) + Simplified Contract Notices (SCN)
+    notice_type_filter = '(notice-type IN ("CN") OR notice-type IN ("PIN-RTL") OR notice-type IN ("PIN") OR notice-type IN ("SCN"))'
+
     query = (
         f"({ft_carport} OR ({title_carport_pv}) OR ({title_parking_pv}))"
         f" AND ({country_parts})"
         f" AND {date_filter}"
+        f" AND {notice_type_filter}"
     )
     return query
 
@@ -1039,6 +1063,129 @@ def process_vergabe_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── bescha.bund.de (Federal Procurement Office) ────────────────────────────────
+
+def search_bescha_de(days: int, verbose: bool = True):
+    """
+    Generator: завантажує bescha.bund.de RSS (або HTML) і фільтрує за keywords.
+    Джерело: Федеральний офіс закупівель (Beschaffungsamt des BMI).
+    """
+    if verbose:
+        print(f"\n[bescha.bund.de] Завантаження ({days}д)...")
+
+    cutoff = date.today() - timedelta(days=days)
+    yielded = 0
+    rss_found = False
+
+    # Спробуємо RSS URLs по порядку
+    for rss_url in BESCHA_RSS_CANDIDATES:
+        try:
+            req = urllib.request.Request(
+                rss_url,
+                headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+            root = ET.fromstring(raw)
+            items = root.findall(".//item")
+            if items:
+                rss_found = True
+                if verbose:
+                    print(f"  RSS знайдено: {rss_url}")
+                break
+        except Exception:
+            continue
+
+    if not rss_found:
+        if verbose:
+            print(f"  RSS недоступна, спроба HTML скрейпингу...")
+        return  # Для простоти, HTML скрейпинг можна додати пізніше
+
+    if not items:
+        if verbose:
+            print(f"  0 items")
+        return
+
+    if verbose:
+        print(f"  {len(items)} items, фільтруємо...")
+
+    for item in items:
+        pub_raw = item.findtext("pubDate", "")
+        pub_dt: date | None = None
+        try:
+            pub_dt = parsedate_to_datetime(pub_raw).date()
+            if pub_dt < cutoff:
+                continue
+        except Exception:
+            pass
+
+        title       = (item.findtext("title") or "").strip()
+        link        = (item.findtext("link") or "").strip()
+        description = (item.findtext("description") or "").strip()
+        guid        = (item.findtext("guid") or link).strip()
+
+        search_text = (title + " " + _strip_html(description)).lower()
+        has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+        has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+        has_solar   = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+        if not (has_carport or (has_parking and has_solar)):
+            continue
+
+        keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+        yielded += 1
+        yield {
+            "title":          title[:300],
+            "link":           link,
+            "description":    description,
+            "guid":           guid,
+            "pub_dt":         pub_dt or date.today(),
+            "keywords_found": keywords_found,
+        }
+
+    if verbose:
+        print(f"  bescha.bund.de: {yielded} релевантних items")
+
+
+def process_bescha_item(item: dict, seen_ids: set, state: dict,
+                        min_score: int) -> dict | None:
+    """Нормалізує bescha.bund.de RSS item у стандартний tender record."""
+    slug      = item["guid"].rstrip("/").split("/")[-1].replace(".html", "")
+    tender_id = f"bescha_{slug}" if slug else f"bescha_{abs(hash(item['guid'])) % 10**10}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    desc_plain   = _strip_html(item["description"])
+    desc_fields  = _parse_bund_description(item["description"])
+    buyer_name   = desc_fields.get("buyer", "")
+    deadline_raw = _extract_deadline_from_text(desc_plain)
+    deadline_iso, days_left = _parse_bund_date(deadline_raw)
+
+    score = 25 + score_tender([], item["keywords_found"], None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  slug or tender_id,
+        "title":               item["title"][:300],
+        "buyer_name":          buyer_name,
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "bescha.bund.de",
+    }
+
+
 # ── deutsches-ausschreibungsblatt.de (DE) ─────────────────────────────────────
 
 class _PostRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1390,6 +1537,259 @@ def process_oeffentlich_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── open.nrw (NRW CKAN API) ────────────────────────────────────────────────────
+
+def search_open_nrw(days: int, verbose: bool = True):
+    """
+    Generator: завантажує CKAN dataset з open.nrw і фільтрує за keywords.
+    Джерело: Nordrhein-Westfalen (NRW) OpenData portal.
+    """
+    if verbose:
+        print(f"\n[open.nrw CKAN] Завантаження ({days}д)...")
+
+    try:
+        url = f"{OPEN_NRW_CKAN_URL}?id={OPEN_NRW_PACKAGE_ID}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            package_data = json.loads(resp.read())
+    except Exception as e:
+        if verbose:
+            print(f"  CKAN API error: {e}")
+        return
+
+    # Знаходимо найсвіжіший CSV/JSON ресурс
+    package = package_data.get("result", {})
+    resources = package.get("resources", [])
+
+    if not resources:
+        if verbose:
+            print(f"  Нема ресурсів у CKAN пакеті")
+        return
+
+    # Шукаємо CSV ресурс
+    csv_url = None
+    for res in resources:
+        name = res.get("name", "").lower()
+        url_res = res.get("url", "")
+        if "csv" in name or url_res.endswith(".csv"):
+            csv_url = url_res
+            break
+
+    if not csv_url:
+        if verbose:
+            print(f"  CSV ресурс не знайдено")
+        return
+
+    if verbose:
+        print(f"  Завантаження CSV: {csv_url}")
+
+    try:
+        import io as _io
+        import csv as csv_mod
+
+        req = urllib.request.Request(
+            csv_url,
+            headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            csv_content = resp.read().decode("utf-8", errors="ignore")
+
+        cutoff = date.today() - timedelta(days=days)
+        yielded = 0
+
+        reader = csv_mod.DictReader(_io.StringIO(csv_content))
+        for row in reader:
+            # Спробуємо розпізнати дату в різних форматах
+            pub_date_raw = row.get("Veröffentlichungsdatum", "") or row.get("publication_date", "")
+            pub_dt: date | None = None
+            try:
+                pub_dt = datetime.strptime(pub_date_raw[:10], "%Y-%m-%d").date()
+                if pub_dt < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+            title = row.get("Titel", "") or row.get("title", "")
+            description = row.get("Beschreibung", "") or row.get("description", "")
+            search_text = (title + " " + description).lower()
+
+            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+            has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+            has_solar   = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+            if not (has_carport or (has_parking and has_solar)):
+                continue
+
+            keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+            link = row.get("Link", "") or ""
+
+            yielded += 1
+            yield {
+                "title":          title[:300],
+                "description":    description[:300],
+                "link":           link,
+                "pub_dt":         pub_dt or date.today(),
+                "guid":           link or f"nrw_open_{abs(hash(title)) % 10**10}",
+                "keywords_found": keywords_found,
+            }
+
+        if verbose:
+            print(f"  open.nrw: {yielded} релевантних записів")
+
+    except Exception as e:
+        if verbose:
+            print(f"  CSV parsing error: {e}")
+
+
+def process_open_nrw_item(item: dict, seen_ids: set, state: dict,
+                          min_score: int) -> dict | None:
+    """Нормалізує open.nrw CSV запис у стандартний tender record."""
+    guid = item["guid"]
+    tender_id = f"nrw_open_{guid.replace('-', '_').replace('/', '_')[:50]}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    score = 25 + score_tender([], item["keywords_found"], None, None)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  guid[:100] or tender_id,
+        "title":               item["title"],
+        "buyer_name":          "",
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       "",
+        "days_until_deadline": "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "open.nrw",
+    }
+
+
+# ── Health Check ──────────────────────────────────────────────────────────────
+
+def run_health_check(sources: list[str] | None = None) -> None:
+    """
+    Перевіряє доступність усіх джерел.
+    Виводить таблицю статусу. Exit code 1 якщо є помилки.
+    """
+    if sources is None:
+        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "bescha", "nrw-open"]
+
+    results: dict[str, dict] = {}
+    for s in sources:
+        results[s] = {"name": s, "status": "?", "detail": "?", "time": "?"}
+
+    SOURCE_NAMES = {
+        "ted": "TED EU API",
+        "bund": "Bund.de RSS",
+        "simap": "simap.ch",
+        "nrw": "vergabe.nrw",
+        "dab": "DAB.de",
+        "oeffentlich": "oeffentlichevergabe.de",
+        "bescha": "bescha.bund.de",
+        "nrw-open": "Open.NRW CKAN",
+    }
+
+    failed = []
+
+    for source_key in sources:
+        t0 = time.time()
+        try:
+            if source_key == "ted":
+                payload = build_payload(build_query(["DEU"], days=1), page=1, page_size=1)
+                data = fetch_page(payload, verbose=False)
+                ok = data is not None and "notices" in data
+                detail = f"{len(data.get('notices', []))} notices" if ok else "API error"
+
+            elif source_key == "bund":
+                req = urllib.request.Request(BUND_RSS_URL, headers={"User-Agent": "WAT-tender-scraper/1.0"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    raw = r.read()
+                root = ET.fromstring(raw)
+                items = root.findall(".//item")
+                ok = True
+                detail = f"{len(items)} items"
+
+            elif source_key == "oeffentlich":
+                target_day = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+                url = f"{OEFFENTLICH_API_URL}?pubDay={target_day}&format=csv.zip"
+                req = urllib.request.Request(url, headers={"User-Agent": "WAT-tender-scraper/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    zdata = r.read()
+                import zipfile as _zf, io as _io
+                zf = _zf.ZipFile(_io.BytesIO(zdata))
+                ok = "notice.csv" in zf.namelist()
+                detail = f"{len(zf.namelist())} files"
+
+            else:
+                # Generic check — just verify connectivity via socket
+                import socket
+                portal_domains = {
+                    "simap": "www.simap.ch",
+                    "nrw": "www.vergabe.nrw.de",
+                    "dab": "www.deutsches-ausschreibungsblatt.de",
+                    "bescha": "www.bescha.bund.de",
+                    "nrw-open": "open.nrw",
+                }
+                domain = portal_domains.get(source_key, "example.com")
+                try:
+                    sock = socket.create_connection((domain, 443), timeout=5)
+                    sock.close()
+                    ok = True
+                    detail = "connection OK"
+                except socket.error:
+                    ok = False
+                    detail = "socket error"
+
+        except Exception as e:
+            ok = False
+            detail = str(e)[:35]
+
+        elapsed = time.time() - t0
+        results[source_key]["name"] = SOURCE_NAMES.get(source_key, source_key)
+        results[source_key]["status"] = "✅ OK" if ok else "❌ ERROR"
+        results[source_key]["detail"] = detail
+        results[source_key]["time"] = f"{elapsed:.1f}s"
+        if not ok:
+            failed.append(source_key)
+
+    # Print table
+    print("\n📋 Tender Scraper — Health Check\n")
+    col_w = [28, 12, 30, 8]
+    header = ["Source", "Status", "Detail", "Time"]
+
+    print("┌" + "┬".join("─" * w for w in col_w) + "┐")
+    print("│" + "│".join(f" {h:<{w-1}}" for h, w in zip(header, col_w)) + "│")
+    print("├" + "┼".join("─" * w for w in col_w) + "┤")
+    for key in sources:
+        r = results[key]
+        cols = [r["name"][:26], r["status"][:10], r["detail"][:28], r["time"][:6]]
+        print("│" + "│".join(f" {c:<{w-1}}" for c, w in zip(cols, col_w)) + "│")
+    print("└" + "┴".join("─" * w for w in col_w) + "┘")
+
+    total = len(sources)
+    passed = total - len(failed)
+    print(f"\n✓ {passed}/{total} джерела відповідають")
+    if failed:
+        print(f"❌ Помилка: {', '.join(failed)}")
+        sys.exit(1)
+    else:
+        print("✅ Всі джерела OK")
+        sys.exit(0)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1443,8 +1843,13 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich"],
-        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de), ted, bund, simap, nrw, dab, oeffentlich (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "bescha", "nrw-open"],
+        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de+bescha.bund.de+open.nrw), ted, bund, simap, nrw, dab, oeffentlich, bescha, nrw-open (default: all)",
+    )
+    parser.add_argument(
+        "--health-check",
+        action="store_true",
+        help="Перевірити доступність всіх джерел і вихід",
     )
     args = parser.parse_args()
 
@@ -1473,6 +1878,11 @@ def main():
         active_sources.append("DAB.de")
     if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
         active_sources.append("oeffentlichevergabe.de")
+
+    if args.health_check:
+        hc_sources = None if args.source == "all" else [args.source]
+        run_health_check(hc_sources)
+        # run_health_check calls sys.exit() so we won't reach here
 
     if verbose:
         print(f"\n📋 Tender Scraper — {region}")
@@ -1596,6 +2006,38 @@ def main():
     if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
         for item in search_oeffentlich_de(countries, args.days, verbose=verbose):
             record = process_oeffentlich_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── bescha.bund.de (тільки для DE або DACH) ─────────────────────────────────────────
+    if args.source in ("all", "bescha") and region in ("DE", "DACH"):
+        for item in search_bescha_de(args.days, verbose=verbose):
+            record = process_bescha_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(record)
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── open.nrw (тільки для DE або DACH) ────────────────────────────────────────────────────
+    if args.source in ("all", "nrw-open") and region in ("DE", "DACH"):
+        for item in search_open_nrw(args.days, verbose=verbose):
+            record = process_open_nrw_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
