@@ -1924,6 +1924,11 @@ def main():
     total_records = 0
     t0 = time.time()
 
+    def _clean_record(record: dict) -> dict:
+        """Strip newlines from all string fields to prevent CSV parse errors."""
+        return {k: re.sub(r'[\r\n]+', ' ', v).strip() if isinstance(v, str) else v
+                for k, v in record.items()}
+
     def ensure_writer(sample: dict):
         nonlocal csv_file, writer
         if writer is None:
@@ -1942,7 +1947,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -1961,7 +1966,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -1977,7 +1982,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -1993,7 +1998,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -2009,7 +2014,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -2025,7 +2030,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -2041,7 +2046,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -2057,7 +2062,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
@@ -2073,7 +2078,7 @@ def main():
             if record is None:
                 continue
             ensure_writer(record)
-            writer.writerow(record)
+            writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
             if not args.no_dedup:
