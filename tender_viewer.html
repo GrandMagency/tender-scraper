@@ -365,7 +365,10 @@
 
 <!-- ── Header ──────────────────────────────────────────────────────────────── -->
 <div class="header">
-  <h1>📋 Tender Leads — Solar Carport DACH</h1>
+  <h1 style="display:flex;align-items:center;gap:10px;background:none;-webkit-text-fill-color:initial">
+    <span style="font-family:Unbounded,sans-serif;font-weight:700;font-size:18px;letter-spacing:-0.02em"><span style="color:#C004D8;-webkit-text-fill-color:#C004D8">.</span><span style="color:#F4F1EA;-webkit-text-fill-color:#F4F1EA">grandma</span></span>
+    <span style="background:linear-gradient(135deg,#A003B2,#C004D8);color:#fff;-webkit-text-fill-color:#fff;-webkit-background-clip:unset;background-clip:unset;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;padding:3px 8px;border-radius:20px;letter-spacing:0.1em;text-transform:lowercase;white-space:nowrap">scraper</span>
+  </h1>
   <div style="display:flex;align-items:center;gap:8px">
     <a href="./parking_viewer.html" style="font-size:11px;color:#A003B2;text-decoration:none;border:1px solid #A003B2;border-radius:4px;padding:3px 8px;white-space:nowrap" title="Parking Leads">🅿 Parking View</a>
     <button class="filter-toggle-btn" id="filter-toggle" onclick="toggleFilters()">Фільтри ▼</button>
@@ -431,6 +434,7 @@
       <option value="Bund.de">Bund.de (DE)</option>
       <option value="simap.ch">simap.ch (CH)</option>
       <option value="DAB.de">DAB.de (DE)</option>
+      <option value="oeffentlichevergabe.de">oeffentlichevergabe.de</option>
     </select>
   </div>
   <div class="filter-group">
@@ -443,7 +447,8 @@
   <div class="filter-group filter-group-days">
     <span class="filter-label">Діапазон</span>
     <div class="days-toggle">
-      <button class="days-btn active" data-days="30" onclick="setDays(30)">30д</button>
+      <button class="days-btn active" data-days="7" onclick="setDays(7)">7д</button>
+      <button class="days-btn" data-days="30" onclick="setDays(30)">30д</button>
       <button class="days-btn" data-days="60" onclick="setDays(60)">60д</button>
       <button class="days-btn" data-days="90" onclick="setDays(90)">90д</button>
     </div>
@@ -496,7 +501,7 @@
 let allData = [];
 let filtered = [];
 let sortCol = 'priority_score';
-let activeDays = 30;
+let activeDays = 7;
 let sortDir = 'desc';
 let page = 1;
 const PAGE_SIZE = 50;
@@ -504,37 +509,51 @@ const PAGE_SIZE = 50;
 // ── Country flags ─────────────────────────────────────────────────────────────
 const FLAG = { DE: '🇩🇪', AT: '🇦🇹', CH: '🇨🇭' };
 
-// ── CSV parser (RFC 4180-ish) ─────────────────────────────────────────────────
+// ── CSV parser (RFC 4180 — handles quoted newlines correctly) ─────────────────
 function parseCSV(text) {
-  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-  if (lines.length < 2) return [];
-  const headers = splitCSVLine(lines[0]);
+  const s = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  let pos = 0;
+
+  function parseField() {
+    if (pos >= s.length) return '';
+    if (s[pos] === '"') {
+      pos++; // skip opening quote
+      let f = '';
+      while (pos < s.length) {
+        if (s[pos] === '"') {
+          if (s[pos + 1] === '"') { f += '"'; pos += 2; } // escaped quote
+          else { pos++; break; }                            // closing quote
+        } else {
+          f += s[pos++];
+        }
+      }
+      return f;
+    }
+    let f = '';
+    while (pos < s.length && s[pos] !== ',' && s[pos] !== '\n') f += s[pos++];
+    return f;
+  }
+
+  function parseRow() {
+    const fields = [];
+    while (true) {
+      fields.push(parseField());
+      if (pos >= s.length || s[pos] === '\n') { pos++; break; }
+      if (s[pos] === ',') { pos++; continue; }
+    }
+    return fields;
+  }
+
+  if (pos >= s.length) return [];
+  const headers = parseRow().map(h => h.trim());
   const result = [];
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const cols = splitCSVLine(lines[i]);
+  while (pos < s.length) {
+    const fields = parseRow();
+    if (fields.every(f => !f.trim())) continue;
     const row = {};
-    headers.forEach((h, idx) => { row[h.trim()] = (cols[idx] || '').trim(); });
+    headers.forEach((h, idx) => { row[h] = (fields[idx] || '').trim(); });
     result.push(row);
   }
-  return result;
-}
-
-function splitCSVLine(line) {
-  const result = [];
-  let cur = '', inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '"') {
-      if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
-      else inQ = !inQ;
-    } else if (c === ',' && !inQ) {
-      result.push(cur); cur = '';
-    } else {
-      cur += c;
-    }
-  }
-  result.push(cur);
   return result;
 }
 
