@@ -223,25 +223,25 @@ def score_tender(cpv_codes: list[str], keywords_found: list[str],
     elif kw_count == 1:
         score += 10
 
-    # Бюджет (0–20)
+    # Бюджет (0–20): більший бюджет = вищий score
     if value_eur:
-        if 50_000 <= value_eur <= 500_000:
+        if value_eur >= 500_000:
             score += 20
-        elif value_eur > 500_000:
-            score += 10
+        elif value_eur >= 50_000:
+            score += 15
         else:
             score += 5
     else:
         score += 5  # невідомий — мінімум
 
-    # Дедлайн (0–10)
+    # Дедлайн (0–10): 10–45д = оптимальне вікно для відповіді
     if days_left is not None:
-        if days_left <= 10:
+        if 10 <= days_left <= 45:
             score += 10
-        elif days_left <= 30:
-            score += 5
+        elif days_left < 10:
+            score += 2   # занадто терміново
         else:
-            score += 2
+            score += 5   # >45д — ще є час
 
     return min(score, 100)
 
@@ -1688,6 +1688,196 @@ def process_open_nrw_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── e-vergabe-sh.de (Schleswig-Holstein) ─────────────────────────────────────
+
+EVERGABE_SH_BASE = "https://www.e-vergabe-sh.de/vergabeplattform/bekanntmachungen"
+EVERGABE_SH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; WAT-tender-scraper/1.0; +https://grandma.agency)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9",
+}
+
+
+def _sh_get_html(url: str, timeout: int = 20) -> str | None:
+    """Завантажує HTML сторінку S-H порталу."""
+    try:
+        req = urllib.request.Request(url, headers=EVERGABE_SH_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+        charset = "utf-8"
+        ct = r.headers.get("Content-Type", "")
+        if "charset=" in ct:
+            charset = ct.split("charset=")[-1].strip().split(";")[0]
+        return raw.decode(charset, errors="replace")
+    except Exception:
+        return None
+
+
+def _sh_extract_items(html: str) -> list[dict]:
+    """Парсить bek_list_item блоки зі S-H HTML (TYPO3 CMS)."""
+    items: list[dict] = []
+
+    # Розбиваємо на блоки по початку кожного bek_list_item
+    chunks = re.split(r'(?=<div[^>]+class="[^"]*bek_list_item[^"]*"[^>]+data-item-id=")', html)
+
+    for chunk in chunks:
+        id_m = re.search(r'data-item-id="(\d+)"', chunk)
+        if not id_m:
+            continue
+        item_id = id_m.group(1)
+
+        # Title
+        title_m = re.search(
+            r'class="bek_list_item_headline"[^>]*>\s*(.*?)\s*</div>',
+            chunk, re.DOTALL,
+        )
+        title = _strip_html(title_m.group(1)).strip() if title_m else ""
+
+        # Info (procedure + location)
+        info_m = re.search(
+            r'class="bek_list_item_info"[^>]*>\s*(.*?)\s*</div>',
+            chunk, re.DOTALL,
+        )
+        info_text = re.sub(r'\s+', ' ', _strip_html(info_m.group(1))).strip() if info_m else ""
+
+        # Info2 (dates)
+        info2_m = re.search(
+            r'class="bek_list_item_info2"[^>]*>\s*(.*?)\s*</div>',
+            chunk, re.DOTALL,
+        )
+        info2_text = re.sub(r'\s+', ' ', _strip_html(info2_m.group(1))).strip() if info2_m else ""
+
+        # Deadline "Frist: DD.MM.YYYY"
+        frist_m = re.search(r'Frist\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4})', info2_text)
+        deadline_raw = frist_m.group(1) if frist_m else ""
+
+        # Publication date "Online Seit: DD.MM.YYYY"
+        online_m = re.search(r'Online\s+Seit\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4})', info2_text, re.IGNORECASE)
+        pub_raw = online_m.group(1) if online_m else ""
+
+        items.append({
+            "item_id":      item_id,
+            "title":        title[:300],
+            "info":         info_text,
+            "deadline_raw": deadline_raw,
+            "pub_raw":      pub_raw,
+        })
+
+    return items
+
+
+def _sh_parse_date(dmy: str) -> date | None:
+    """DD.MM.YYYY → date."""
+    try:
+        d, mo, y = dmy.strip().split(".")
+        return date(int(y), int(mo), int(d))
+    except Exception:
+        return None
+
+
+def search_evergabe_sh(days: int, verbose: bool = True):
+    """
+    Generator: скрейпить e-vergabe-sh.de (Schleswig-Holstein) і фільтрує за keywords.
+    Портал — статичний TYPO3 HTML, пагінація через ?page=N.
+    """
+    if verbose:
+        print(f"\n[e-vergabe-sh.de] Завантаження ({days}д)...")
+
+    cutoff = date.today() - timedelta(days=days)
+    yielded = 0
+    page = 1
+
+    while True:
+        url = EVERGABE_SH_BASE if page == 1 else f"{EVERGABE_SH_BASE}?page={page}"
+        html = _sh_get_html(url)
+        if not html:
+            if verbose:
+                print(f"  S-H: помилка завантаження стор.{page}")
+            break
+
+        items = _sh_extract_items(html)
+        if not items:
+            break  # кінець пагінації
+
+        found_on_page = False
+        for item in items:
+            pub_dt = _sh_parse_date(item["pub_raw"])
+            if pub_dt and pub_dt < cutoff:
+                continue
+
+            search_text = (item["title"] + " " + item["info"]).lower()
+            has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+            has_parking = any(t.lower()  in search_text for t  in PARKING_PV_TERMS)
+            has_solar   = any(t.lower()  in search_text for t  in SOLAR_TERMS)
+
+            if not (has_carport or (has_parking and has_solar)):
+                continue
+
+            keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+            found_on_page = True
+            yielded += 1
+            item["pub_dt"]       = pub_dt or date.today()
+            item["keywords_found"] = keywords_found
+            yield item
+
+        # Якщо всі items старіші за cutoff — зупиняємось (portal sorted newest first)
+        if not found_on_page:
+            oldest = None
+            for item in items:
+                d = _sh_parse_date(item["pub_raw"])
+                if d:
+                    oldest = d
+            if oldest and oldest < cutoff:
+                break
+
+        page += 1
+        if page > 50:  # safety cap
+            break
+
+    if verbose:
+        print(f"  e-vergabe-sh.de: {yielded} релевантних items")
+
+
+def process_evergabe_sh_item(item: dict, seen_ids: set, state: dict,
+                              min_score: int) -> dict | None:
+    """Нормалізує S-H item у стандартний tender record."""
+    tender_id = f"sh_{item['item_id']}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    deadline_dt  = _sh_parse_date(item["deadline_raw"])
+    deadline_iso = deadline_dt.isoformat() if deadline_dt else ""
+    days_left: int | None = None
+    if deadline_dt:
+        days_left = (deadline_dt - date.today()).days
+
+    score = 20 + score_tender([], item["keywords_found"], None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    link = f"{EVERGABE_SH_BASE}/{item['item_id']}"
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  item["item_id"],
+        "title":               item["title"],
+        "buyer_name":          item["info"][:200],
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item["keywords_found"]),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             link,
+        "source":              "e-vergabe-sh",
+    }
+
+
 # ── Health Check ──────────────────────────────────────────────────────────────
 
 def run_health_check(sources: list[str] | None = None) -> None:
@@ -1696,7 +1886,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
     Виводить таблицю статусу. Exit code 1 якщо є помилки.
     """
     if sources is None:
-        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich"]
+        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh"]
 
     results: dict[str, dict] = {}
     for s in sources:
@@ -1709,6 +1899,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
         "nrw": "vergabe.nrw",
         "dab": "DAB.de",
         "oeffentlich": "oeffentlichevergabe.de",
+        "sh": "e-vergabe-sh.de",
         "bescha": "bescha.bund.de",
         "nrw-open": "Open.NRW CKAN",
     }
@@ -1750,6 +1941,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
                     "simap": "https://www.simap.ch",
                     "nrw": "https://www.vergabe.nrw.de",
                     "dab": "https://www.deutsches-ausschreibungsblatt.de",
+                    "sh": "https://www.e-vergabe-sh.de/vergabeplattform/bekanntmachungen",
                     "bescha": "https://www.bescha.bund.de",
                     "nrw-open": "https://open.nrw",
                 }
@@ -1856,8 +2048,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "bescha", "nrw-open"],
-        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de+bescha.bund.de+open.nrw), ted, bund, simap, nrw, dab, oeffentlich, bescha, nrw-open (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh", "bescha", "nrw-open"],
+        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de+e-vergabe-sh.de), ted, bund, simap, nrw, dab, oeffentlich, sh, bescha, nrw-open (default: all)",
     )
     parser.add_argument(
         "--health-check",
@@ -1891,6 +2083,8 @@ def main():
         active_sources.append("DAB.de")
     if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
         active_sources.append("oeffentlichevergabe.de")
+    if args.source in ("all", "sh") and region in ("DE", "DACH"):
+        active_sources.append("e-vergabe-sh.de")
 
     if args.health_check:
         hc_sources = None if args.source == "all" else [args.source]
@@ -2059,6 +2253,22 @@ def main():
     if args.source == "bescha" and region in ("DE", "DACH"):
         for item in search_bescha_de(args.days, verbose=verbose):
             record = process_bescha_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(_clean_record(record))
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── e-vergabe-sh.de (Schleswig-Holstein) ─────────────────────────────────────
+    if args.source in ("all", "sh") and region in ("DE", "DACH"):
+        for item in search_evergabe_sh(args.days, verbose=verbose):
+            record = process_evergabe_sh_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
