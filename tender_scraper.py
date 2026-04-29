@@ -1878,6 +1878,257 @@ def process_evergabe_sh_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── vergabe.bayern.de (meinauftrag.rib.de) ────────────────────────────────────
+
+VERGABE_BY_FRAME = (
+    "https://www.meinauftrag.rib.de/public/publicationsFrame"
+    "?filter=604283&config=exante/false"
+)
+VERGABE_BY_AJAX = "https://www.meinauftrag.rib.de/public/nextPublications"
+_BY_UA = "Mozilla/5.0 (compatible; WAT-tender-scraper/1.0; +https://grandma.agency)"
+
+_BY_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def _by_parse_date(day_str: str, month_year_str: str) -> date | None:
+    """'29' + 'April 2026' → date(2026, 4, 29)"""
+    try:
+        parts = month_year_str.strip().split()
+        if len(parts) != 2:
+            return None
+        month = _BY_MONTHS.get(parts[0].lower())
+        year = int(parts[1])
+        return date(year, month, int(day_str.strip()))
+    except Exception:
+        return None
+
+
+def _by_parse_deadline(text: str) -> date | None:
+    """'May 26, 2026, 10:20 AM' or 'May 26, 2026' → date(2026, 5, 26)"""
+    m = re.search(r'(\w+)\s+(\d{1,2}),\s+(\d{4})', text)
+    if not m:
+        return None
+    try:
+        month = _BY_MONTHS.get(m.group(1).lower())
+        if not month:
+            return None
+        return date(int(m.group(3)), month, int(m.group(2)))
+    except Exception:
+        return None
+
+
+def _by_extract_items(html: str) -> list[dict]:
+    """Парсить tender items з HTML сторінки або AJAX-відповіді."""
+    items = []
+    chunks = re.split(r'(?=<li\b[^>]+\bid="tender-\d+)', html)
+    for chunk in chunks:
+        id_m = re.search(r'\bid="tender-(\d+)"', chunk)
+        if not id_m:
+            continue
+        tender_id = id_m.group(1)
+
+        # Заголовок: <div class="overflow-hidden h-20"><strong>...</strong></div>
+        title_m = re.search(
+            r'class="overflow-hidden h-20"[^>]*>\s*<strong[^>]*>\s*(.*?)\s*</strong>',
+            chunk, re.DOTALL
+        )
+        title = _strip_html(title_m.group(1)) if title_m else ""
+
+        # Замовник: title="..." всередині text-muted div (HTML malformed — title= в class="")
+        buyer_m = re.search(r'class="text-muted[^"]*\s+title="([^"]+)"', chunk)
+        buyer = buyer_m.group(1).strip() if buyer_m else ""
+
+        # Дата публікації: item-right section
+        day_m = re.search(r'class="date">(\d+)</div>', chunk)
+        month_m = re.search(r'class="month">([^<]+)</div>', chunk)
+        pub_dt: date | None = None
+        if day_m and month_m:
+            pub_dt = _by_parse_date(day_m.group(1), month_m.group(1))
+
+        # Deadline: "Expiration time" label + date after it
+        deadline_m = re.search(
+            r'Expiration time</div>\s*<div[^>]*>\s*([^<]+?)\s*</div>',
+            chunk, re.DOTALL
+        )
+        deadline_dt: date | None = None
+        if deadline_m:
+            deadline_dt = _by_parse_deadline(deadline_m.group(1))
+
+        if title and pub_dt:
+            items.append({
+                "item_id":      tender_id,
+                "title":        title[:300],
+                "buyer":        buyer[:200],
+                "pub_dt":       pub_dt,
+                "deadline_dt":  deadline_dt,
+                "link":         f"https://www.meinauftrag.rib.de/public/publications/{tender_id}",
+            })
+    return items
+
+
+def search_vergabe_by(days: int, verbose: bool = True) -> list[dict]:
+    """
+    Scraper для vergabe.bayern.de (meinauftrag.rib.de / RIB platform).
+    GET iframe → extract CSRF + first 20 items → POST AJAX для пагінації.
+    Зупиняється коли pub_dt < cutoff або items порожній.
+    """
+    import http.cookiejar as _cookiejar
+
+    cutoff = date.today() - timedelta(days=days)
+    results: list[dict] = []
+
+    # Session з cookie (PHPSESSID + CSRF)
+    cj = _cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    opener.addheaders = [
+        ("User-Agent", _BY_UA),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("Accept-Language", "de-DE,de;q=0.9,en;q=0.8"),
+    ]
+
+    if verbose:
+        print("[vergabe.bayern.de] Завантаження...")
+
+    # GET initial page
+    try:
+        with opener.open(VERGABE_BY_FRAME, timeout=25) as r:
+            init_html = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        if verbose:
+            print(f"  [Bayern] Помилка GET: {e}")
+        return results
+
+    # Extract CSRF token
+    token_m = re.search(r"YII_CSRF_TOKEN\s*=\s*'([^']+)'", init_html)
+    csrf = token_m.group(1) if token_m else ""
+    if not csrf and verbose:
+        print("  [Bayern] CSRF token не знайдено — AJAX може не працювати")
+
+    # Parse initial 20 items
+    for item in _by_extract_items(init_html):
+        if item["pub_dt"] and item["pub_dt"] < cutoff:
+            continue
+        kw = [k for k in CARPORT_KEYWORDS if k.lower() in item["title"].lower()]
+        if kw:
+            item["keywords_found"] = kw
+            results.append(item)
+
+    if verbose:
+        print(f"  [Bayern] Початкова сторінка: 20 items")
+
+    # AJAX pagination
+    offset = 20
+    max_pages = 50  # safety limit
+    total_entries_m = re.search(r'totalEntries\s*=\s*(\d+)', init_html)
+    total_entries = int(total_entries_m.group(1)) if total_entries_m else 999
+
+    for _ in range(max_pages):
+        if offset >= total_entries:
+            break
+
+        post_data = urllib.parse.urlencode({
+            "offset":           offset,
+            "filter":           "604283",
+            "search":           "",
+            "collapse":         "true",
+            "YII_CSRF_TOKEN":   csrf,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(VERGABE_BY_AJAX, data=post_data, headers={
+            "Content-Type":     "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer":          VERGABE_BY_FRAME,
+            "Accept":           "application/json, */*",
+        })
+
+        try:
+            with opener.open(req, timeout=25) as r2:
+                raw2 = r2.read()
+        except Exception as e:
+            if verbose:
+                print(f"  [Bayern] AJAX помилка (offset={offset}): {e}")
+            break
+
+        if not raw2:
+            break
+
+        try:
+            data = json.loads(raw2.decode("utf-8", errors="replace"))
+        except Exception:
+            break
+
+        items_html = data.get("items", "")
+        if not items_html:
+            break
+
+        batch = _by_extract_items(items_html)
+        if not batch:
+            break
+
+        all_old = True
+        for item in batch:
+            if item["pub_dt"] and item["pub_dt"] < cutoff:
+                continue
+            all_old = False
+            kw = [k for k in CARPORT_KEYWORDS if k.lower() in item["title"].lower()]
+            if kw:
+                item["keywords_found"] = kw
+                results.append(item)
+
+        if all_old:
+            break
+
+        offset += len(batch)
+
+    if verbose:
+        matches = len(results)
+        print(f"  vergabe.bayern.de: {matches} релевантних тендерів")
+
+    return results
+
+
+def process_vergabe_by_item(item: dict, seen_ids: set, state: dict,
+                             min_score: int) -> dict | None:
+    """Нормалізує Bayern item у стандартний tender record."""
+    tender_id = f"by_{item['item_id']}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    deadline_dt = item.get("deadline_dt")
+    deadline_iso = deadline_dt.isoformat() if deadline_dt else ""
+    days_left: int | None = None
+    if deadline_dt:
+        days_left = (deadline_dt - date.today()).days
+
+    score = 20 + score_tender([], item.get("keywords_found", []), None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  item["item_id"],
+        "title":               item["title"],
+        "buyer_name":          item["buyer"],
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item.get("keywords_found", [])),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_dt"].isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "vergabe.bayern.de",
+    }
+
+
 # ── Health Check ──────────────────────────────────────────────────────────────
 
 def run_health_check(sources: list[str] | None = None) -> None:
@@ -1886,7 +2137,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
     Виводить таблицю статусу. Exit code 1 якщо є помилки.
     """
     if sources is None:
-        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh"]
+        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh", "by"]
 
     results: dict[str, dict] = {}
     for s in sources:
@@ -1900,6 +2151,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
         "dab": "DAB.de",
         "oeffentlich": "oeffentlichevergabe.de",
         "sh": "e-vergabe-sh.de",
+        "by": "vergabe.bayern.de",
         "bescha": "bescha.bund.de",
         "nrw-open": "Open.NRW CKAN",
     }
@@ -1942,6 +2194,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
                     "nrw": "https://www.vergabe.nrw.de",
                     "dab": "https://www.deutsches-ausschreibungsblatt.de",
                     "sh": "https://www.e-vergabe-sh.de/vergabeplattform/bekanntmachungen",
+                    "by": "https://www.meinauftrag.rib.de/public/publicationsFrame?filter=604283",
                     "bescha": "https://www.bescha.bund.de",
                     "nrw-open": "https://open.nrw",
                 }
@@ -2048,8 +2301,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh", "bescha", "nrw-open"],
-        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de+e-vergabe-sh.de), ted, bund, simap, nrw, dab, oeffentlich, sh, bescha, nrw-open (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh", "by", "bescha", "nrw-open"],
+        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de+e-vergabe-sh.de+vergabe.bayern.de), ted, bund, simap, nrw, dab, oeffentlich, sh, by, bescha, nrw-open (default: all)",
     )
     parser.add_argument(
         "--health-check",
@@ -2085,6 +2338,8 @@ def main():
         active_sources.append("oeffentlichevergabe.de")
     if args.source in ("all", "sh") and region in ("DE", "DACH"):
         active_sources.append("e-vergabe-sh.de")
+    if args.source in ("all", "by") and region in ("DE", "DACH"):
+        active_sources.append("vergabe.bayern.de")
 
     if args.health_check:
         hc_sources = None if args.source == "all" else [args.source]
@@ -2269,6 +2524,22 @@ def main():
     if args.source in ("all", "sh") and region in ("DE", "DACH"):
         for item in search_evergabe_sh(args.days, verbose=verbose):
             record = process_evergabe_sh_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(_clean_record(record))
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── vergabe.bayern.de (Bayern / RIB platform) ────────────────────────────────
+    if args.source in ("all", "by") and region in ("DE", "DACH"):
+        for item in search_vergabe_by(args.days, verbose=verbose):
+            record = process_vergabe_by_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
