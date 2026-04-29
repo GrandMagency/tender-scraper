@@ -57,6 +57,7 @@ CARPORT_KEYWORDS = [
     "PV-Carport",
     "Carport-PV-Anlage",                  # Photovoltaikanlage auf Carport
     "Photovoltaik-Parkplatzüberdachung",  # compound form used by many municipalities
+    "Solardach",                          # glass solar roof systems (e.g. Glas-Solardach-System)
     "Carport",               # буде зʼєднано AND з PV у query
     "Parkplatzüberdachung",  # "накриття паркінгу" — настільки специфічний, що AND Solar не треба
 ]
@@ -1688,6 +1689,456 @@ def process_open_nrw_item(item: dict, seen_ids: set, state: dict,
     }
 
 
+# ── Cosinex NetServer helper (reused by MV, München) ─────────────────────────
+
+_COSINEX_UA = "Mozilla/5.0 (compatible; WAT-tender-scraper/1.0; +https://grandma.agency)"
+
+def _cosinex_get_html(url: str, timeout: int = 20) -> str | None:
+    """Завантажує HTML сторінку Cosinex NetServer порталу."""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _COSINEX_UA,
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "de-DE,de;q=0.9",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+        ct = r.headers.get("Content-Type", "")
+        charset = "utf-8"
+        if "charset=" in ct:
+            charset = ct.split("charset=")[-1].strip().split(";")[0]
+        return raw.decode(charset, errors="replace")
+    except Exception:
+        return None
+
+
+def _cosinex_extract_rows(html: str, base_url: str) -> list[dict]:
+    """
+    Парсить рядки результатів пошуку Cosinex NetServer.
+    Шукає посилання типу PublicationDetail або PublicationSearchDetail
+    і витягує назву, орган, дати з оточуючих TD-клітин.
+    """
+    rows = []
+    seen_links: set = set()
+
+    for chunk in re.split(r'(?=<tr[\s>])', html):
+        link_m = re.search(
+            r'href="([^"]*(?:PublicationDetail|publicationId=)[^"]*)"[^>]*>\s*([^<]+)',
+            chunk, re.IGNORECASE,
+        )
+        if not link_m:
+            continue
+
+        link_path = link_m.group(1)
+        title = _strip_html(link_m.group(2)).strip()
+        if not title or len(title) < 4:
+            continue
+        if not link_path.startswith("http"):
+            link_path = base_url.rstrip("/") + link_path if link_path.startswith("/") else base_url + "/" + link_path
+        if link_path in seen_links:
+            continue
+        seen_links.add(link_path)
+
+        # Всі дати DD.MM.YYYY в рядку
+        dates = re.findall(r"\b(\d{2}\.\d{2}\.\d{4})\b", chunk)
+
+        # Орган: перший TD що не порожній і не є заголовком
+        cells = [_strip_html(c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", chunk, re.DOTALL)]
+        non_title = [c for c in cells if c and c not in (title,) and len(c) > 2 and not re.match(r"^\d{2}\.\d{2}\.\d{4}$", c)]
+        authority = non_title[0][:200] if non_title else ""
+
+        rows.append({
+            "title":        title[:300],
+            "link":         link_path,
+            "authority":    authority,
+            "pub_raw":      dates[0] if dates else "",
+            "deadline_raw": dates[1] if len(dates) > 1 else "",
+        })
+
+    return rows
+
+
+# ── evergabe-mv.de (Mecklenburg-Vorpommern / Cosinex NetServer) ───────────────
+
+EVERGABE_MV_BASE = "https://vergabe.mv-regierung.de"
+EVERGABE_MV_SEARCH_TPL = (
+    "https://vergabe.mv-regierung.de/NetServer/PublicationSearchControllerServlet"
+    "?function=Search&OrderBy=TenderKind&Order=desc"
+    "&Start={start}&PublicationType=&Searchkey={term}"
+)
+MV_PAGE_SIZE = 50  # Cosinex NetServer default
+
+MV_SEARCH_TERMS = [
+    "Solarcarport", "Solar+Carport", "PV+Carport", "Solardach",
+    "Carport+Photovoltaik", "Parkplatzüberdachung",
+]
+
+
+def search_evergabe_mv(days: int, verbose: bool = True):
+    """
+    Generator: скрейпить evergabe-mv.de (Mecklenburg-Vorpommern) через
+    Cosinex NetServer PublicationSearchControllerServlet.
+    Пагінація через Start-параметр (0, 50, 100 ...).
+    """
+    if verbose:
+        print(f"\n[evergabe-mv.de] Завантаження ({days}д)...")
+
+    cutoff = date.today() - timedelta(days=days)
+    yielded = 0
+    seen_links: set = set()
+
+    for term in MV_SEARCH_TERMS:
+        start = 0
+        while True:
+            url = EVERGABE_MV_SEARCH_TPL.format(start=start, term=term)
+            html = _cosinex_get_html(url)
+            if not html:
+                break
+
+            rows = _cosinex_extract_rows(html, EVERGABE_MV_BASE)
+            if not rows:
+                break
+
+            new_in_batch = 0
+            for row in rows:
+                if row["link"] in seen_links:
+                    continue
+                seen_links.add(row["link"])
+
+                pub_dt = _sh_parse_date(row["pub_raw"]) if row["pub_raw"] else None
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                search_text = (row["title"] + " " + row["authority"]).lower()
+                has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+                has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+                has_solar   = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+                if not (has_carport or (has_parking and has_solar)):
+                    continue
+
+                keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+                row["pub_dt"] = pub_dt or date.today()
+                row["keywords_found"] = keywords_found
+                yielded += 1
+                new_in_batch += 1
+                yield row
+
+            if len(rows) < MV_PAGE_SIZE:
+                break  # остання сторінка
+
+            start += MV_PAGE_SIZE
+            if start > 2000:  # safety cap
+                break
+
+        time.sleep(0.5)
+
+    if verbose:
+        print(f"  evergabe-mv.de: {yielded} релевантних items")
+
+
+def process_evergabe_mv_item(item: dict, seen_ids: set, state: dict,
+                              min_score: int) -> dict | None:
+    """Нормалізує evergabe-mv.de item у стандартний tender record."""
+    slug = re.search(r"publicationId=(\d+)", item["link"])
+    pub_id = slug.group(1) if slug else abs(hash(item["link"])) % 10**10
+    tender_id = f"mv_{pub_id}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    deadline_raw = item.get("deadline_raw", "")
+    deadline_iso, days_left = _parse_bund_date(deadline_raw)
+    pub_dt = item.get("pub_dt", date.today())
+
+    score = 20 + score_tender([], item.get("keywords_found", []), None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  str(pub_id),
+        "title":               item["title"],
+        "buyer_name":          item.get("authority", ""),
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item.get("keywords_found", [])),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    pub_dt.isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "evergabe-mv.de",
+    }
+
+
+# ── vergabe.muenchen.de (München / Cosinex NetServer) ────────────────────────
+
+VERGABE_MUC_BASE = "https://vergabe.muenchen.de"
+VERGABE_MUC_SEARCH_TPL = (
+    "https://vergabe.muenchen.de/NetServer/PublicationSearchControllerServlet"
+    "?function=Search&OrderBy=TenderKind&Order=desc"
+    "&Start={start}&PublicationType=&Searchkey={term}"
+)
+
+MUC_SEARCH_TERMS = MV_SEARCH_TERMS  # identical Cosinex keyword list
+
+
+def search_vergabe_muc(days: int, verbose: bool = True):
+    """
+    Generator: скрейпить vergabe.muenchen.de через Cosinex NetServer.
+    Той самий паттерн що і evergabe-mv.de.
+    """
+    if verbose:
+        print(f"\n[vergabe.muenchen.de] Завантаження ({days}д)...")
+
+    cutoff = date.today() - timedelta(days=days)
+    yielded = 0
+    seen_links: set = set()
+
+    for term in MUC_SEARCH_TERMS:
+        start = 0
+        while True:
+            url = VERGABE_MUC_SEARCH_TPL.format(start=start, term=term)
+            html = _cosinex_get_html(url)
+            if not html:
+                break
+
+            rows = _cosinex_extract_rows(html, VERGABE_MUC_BASE)
+            if not rows:
+                break
+
+            for row in rows:
+                if row["link"] in seen_links:
+                    continue
+                seen_links.add(row["link"])
+
+                pub_dt = _sh_parse_date(row["pub_raw"]) if row["pub_raw"] else None
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                search_text = (row["title"] + " " + row["authority"]).lower()
+                has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+                has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+                has_solar   = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+                if not (has_carport or (has_parking and has_solar)):
+                    continue
+
+                keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+                row["pub_dt"] = pub_dt or date.today()
+                row["keywords_found"] = keywords_found
+                yielded += 1
+                yield row
+
+            if len(rows) < MV_PAGE_SIZE:
+                break
+
+            start += MV_PAGE_SIZE
+            if start > 2000:
+                break
+
+        time.sleep(0.5)
+
+    if verbose:
+        print(f"  vergabe.muenchen.de: {yielded} релевантних items")
+
+
+def process_vergabe_muc_item(item: dict, seen_ids: set, state: dict,
+                              min_score: int) -> dict | None:
+    """Нормалізує vergabe.muenchen.de item у стандартний tender record."""
+    slug = re.search(r"publicationId=(\d+)", item["link"])
+    pub_id = slug.group(1) if slug else abs(hash(item["link"])) % 10**10
+    tender_id = f"muc_{pub_id}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    deadline_raw = item.get("deadline_raw", "")
+    deadline_iso, days_left = _parse_bund_date(deadline_raw)
+    pub_dt = item.get("pub_dt", date.today())
+
+    score = 20 + score_tender([], item.get("keywords_found", []), None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  str(pub_id),
+        "title":               item["title"],
+        "buyer_name":          item.get("authority", ""),
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item.get("keywords_found", [])),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    pub_dt.isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "vergabe.muenchen.de",
+    }
+
+
+# ── had.de (Hessen — Hessischer Ausschreibungsdienst) ─────────────────────────
+
+HAD_BASE = "https://www.had.de"
+HAD_SEARCH_TPL = "https://www.had.de/onlinesuche/suche.html?suche={term}&seite={page}"
+
+HAD_SEARCH_TERMS = [
+    "Solarcarport", "Solar+Carport", "PV-Carport", "Solardach",
+    "Carport+Photovoltaik", "Parkplatzüberdachung",
+]
+
+
+def _had_extract_items(html: str) -> list[dict]:
+    """
+    Парсить результати had.de.
+    HAD використовує HTML-таблицю або список; шукаємо посилання + DD.MM.YYYY дати.
+    """
+    items = []
+    seen_links: set = set()
+
+    # Спроба 1: рядки таблиці з посиланнями
+    for chunk in re.split(r'(?=<tr[\s>])', html):
+        link_m = re.search(r'href="([^"]*had\.de[^"]*|/[^"]+\.html[^"]*)"[^>]*>\s*([^<]+)', chunk, re.IGNORECASE)
+        if not link_m:
+            # fallback: будь-яке посилання у рядку
+            link_m = re.search(r'href="(/[^"]+)"[^>]*>\s*([^<]{10,})', chunk)
+        if not link_m:
+            continue
+        link_path = link_m.group(1)
+        title = _strip_html(link_m.group(2)).strip()
+        if not title or len(title) < 8:
+            continue
+        # Відкидаємо навігацію
+        if any(nav in title.lower() for nav in ("suche", "home", "impressum", "datenschutz", "login")):
+            continue
+        if not link_path.startswith("http"):
+            link_path = HAD_BASE + link_path if link_path.startswith("/") else HAD_BASE + "/" + link_path
+        if link_path in seen_links:
+            continue
+        seen_links.add(link_path)
+
+        dates = re.findall(r"\b(\d{2}\.\d{2}\.\d{4})\b", chunk)
+        cells = [_strip_html(c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", chunk, re.DOTALL)]
+        non_title = [c for c in cells if c and c not in (title,) and len(c) > 2 and not re.match(r"^\d", c)]
+        authority = non_title[0][:200] if non_title else ""
+
+        items.append({
+            "title":        title[:300],
+            "link":         link_path,
+            "authority":    authority,
+            "pub_raw":      dates[0] if dates else "",
+            "deadline_raw": dates[1] if len(dates) > 1 else "",
+        })
+
+    return items
+
+
+def search_had_hessen(days: int, verbose: bool = True):
+    """
+    Generator: пошук тендерів на had.de (Hessischer Ausschreibungsdienst, Hessen).
+    Пошук через GET params: ?suche={term}&seite={page}.
+    """
+    if verbose:
+        print(f"\n[had.de] Завантаження ({days}д)...")
+
+    cutoff = date.today() - timedelta(days=days)
+    yielded = 0
+    seen_links: set = set()
+
+    for term in HAD_SEARCH_TERMS:
+        page = 1
+        while page <= 20:  # safety cap: 20 стор. × ~20 items = 400 max
+            url = HAD_SEARCH_TPL.format(term=term, page=page)
+            html = _cosinex_get_html(url)
+            if not html:
+                break
+
+            items = _had_extract_items(html)
+            if not items:
+                break
+
+            new_on_page = 0
+            for row in items:
+                if row["link"] in seen_links:
+                    continue
+                seen_links.add(row["link"])
+
+                pub_dt = _sh_parse_date(row["pub_raw"]) if row["pub_raw"] else None
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                search_text = (row["title"] + " " + row["authority"]).lower()
+                has_carport = any(kw.lower() in search_text for kw in CARPORT_KEYWORDS)
+                has_parking = any(t.lower() in search_text for t in PARKING_PV_TERMS)
+                has_solar   = any(t.lower() in search_text for t in SOLAR_TERMS)
+
+                if not (has_carport or (has_parking and has_solar)):
+                    continue
+
+                keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in search_text]
+                row["pub_dt"] = pub_dt or date.today()
+                row["keywords_found"] = keywords_found
+                yielded += 1
+                new_on_page += 1
+                yield row
+
+            if new_on_page == 0 and page > 1:
+                break  # жодних нових — кінець пагінації
+
+            page += 1
+            time.sleep(0.3)
+
+        time.sleep(0.5)
+
+    if verbose:
+        print(f"  had.de: {yielded} релевантних items")
+
+
+def process_had_item(item: dict, seen_ids: set, state: dict,
+                     min_score: int) -> dict | None:
+    """Нормалізує had.de item у стандартний tender record."""
+    slug = item["link"].rstrip("/").split("/")[-1].replace(".html", "").replace(".php", "")
+    tender_id = f"had_{slug}" if slug and len(slug) > 2 else f"had_{abs(hash(item['link'])) % 10**10}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    deadline_raw = item.get("deadline_raw", "")
+    deadline_iso, days_left = _parse_bund_date(deadline_raw)
+    pub_dt = item.get("pub_dt", date.today())
+
+    score = 20 + score_tender([], item.get("keywords_found", []), None, days_left)
+    score = min(score, 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  slug or tender_id,
+        "title":               item["title"],
+        "buyer_name":          item.get("authority", ""),
+        "buyer_country":       "DE",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(item.get("keywords_found", [])),
+        "estimated_value_eur": "",
+        "deadline_date":       deadline_iso,
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    pub_dt.isoformat(),
+        "priority_score":      score,
+        "ted_url":             item["link"],
+        "source":              "had.de",
+    }
+
+
 # ── e-vergabe-sh.de (Schleswig-Holstein) ─────────────────────────────────────
 
 EVERGABE_SH_BASE = "https://www.e-vergabe-sh.de/vergabeplattform/bekanntmachungen"
@@ -2137,7 +2588,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
     Виводить таблицю статусу. Exit code 1 якщо є помилки.
     """
     if sources is None:
-        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh", "by"]
+        sources = ["ted", "bund", "simap", "nrw", "dab", "oeffentlich", "mv", "muc", "had", "sh", "by"]
 
     results: dict[str, dict] = {}
     for s in sources:
@@ -2152,6 +2603,9 @@ def run_health_check(sources: list[str] | None = None) -> None:
         "oeffentlich": "oeffentlichevergabe.de",
         "sh": "e-vergabe-sh.de",
         "by": "vergabe.bayern.de",
+        "mv": "evergabe-mv.de",
+        "muc": "vergabe.muenchen.de",
+        "had": "had.de (Hessen)",
         "bescha": "bescha.bund.de",
         "nrw-open": "Open.NRW CKAN",
     }
@@ -2195,6 +2649,9 @@ def run_health_check(sources: list[str] | None = None) -> None:
                     "dab": "https://www.deutsches-ausschreibungsblatt.de",
                     "sh": "https://www.e-vergabe-sh.de/vergabeplattform/bekanntmachungen",
                     "by": "https://www.meinauftrag.rib.de/public/publicationsFrame?filter=604283",
+                    "mv": "https://vergabe.mv-regierung.de/NetServer/PublicationSearchControllerServlet?function=Search&Searchkey=carport&Start=0",
+                    "muc": "https://vergabe.muenchen.de/NetServer/PublicationSearchControllerServlet?function=Search&Searchkey=carport&Start=0",
+                    "had": "https://www.had.de/onlinesuche/suche.html?suche=carport",
                     "bescha": "https://www.bescha.bund.de",
                     "nrw-open": "https://open.nrw",
                 }
@@ -2301,8 +2758,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "sh", "by", "bescha", "nrw-open"],
-        help="Джерело: all (TED+Bund.de+simap.ch+vergabe.nrw+DAB.de+oeffentlichevergabe.de+e-vergabe-sh.de+vergabe.bayern.de), ted, bund, simap, nrw, dab, oeffentlich, sh, by, bescha, nrw-open (default: all)",
+        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "mv", "muc", "had", "sh", "by", "bescha", "nrw-open"],
+        help="Джерело: all, ted, bund, simap, nrw, dab, oeffentlich, mv, muc, had, sh, by, bescha, nrw-open (default: all)",
     )
     parser.add_argument(
         "--health-check",
@@ -2336,6 +2793,12 @@ def main():
         active_sources.append("DAB.de")
     if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
         active_sources.append("oeffentlichevergabe.de")
+    if args.source in ("all", "mv") and region in ("DE", "DACH"):
+        active_sources.append("evergabe-mv.de")
+    if args.source in ("all", "muc") and region in ("DE", "DACH"):
+        active_sources.append("vergabe.muenchen.de")
+    if args.source in ("all", "had") and region in ("DE", "DACH"):
+        active_sources.append("had.de (Hessen)")
     if args.source in ("all", "sh") and region in ("DE", "DACH"):
         active_sources.append("e-vergabe-sh.de")
     if args.source in ("all", "by") and region in ("DE", "DACH"):
@@ -2508,6 +2971,54 @@ def main():
     if args.source == "bescha" and region in ("DE", "DACH"):
         for item in search_bescha_de(args.days, verbose=verbose):
             record = process_bescha_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(_clean_record(record))
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── evergabe-mv.de (Mecklenburg-Vorpommern / Cosinex NetServer) ─────────────
+    if args.source in ("all", "mv") and region in ("DE", "DACH"):
+        for item in search_evergabe_mv(args.days, verbose=verbose):
+            record = process_evergabe_mv_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(_clean_record(record))
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── vergabe.muenchen.de (München / Cosinex NetServer) ────────────────────────
+    if args.source in ("all", "muc") and region in ("DE", "DACH"):
+        for item in search_vergabe_muc(args.days, verbose=verbose):
+            record = process_vergabe_muc_item(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(_clean_record(record))
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── had.de (Hessen) ───────────────────────────────────────────────────────────
+    if args.source in ("all", "had") and region in ("DE", "DACH"):
+        for item in search_had_hessen(args.days, verbose=verbose):
+            record = process_had_item(item, seen_ids, dedup_state, args.min_score)
             if record is None:
                 continue
             ensure_writer(record)
