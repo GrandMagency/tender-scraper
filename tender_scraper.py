@@ -176,6 +176,152 @@ DAB_VERGABETYP_LABELS = {1: "Ausschreibung", 2: "Vergabe", 3: "Vergebener Auftra
 # ── State-файл (dedup між запусками) ──────────────────────────────────────────
 STATE_FILE = Path(".state.json")
 
+# ── Enrichment constants ───────────────────────────────────────────────────────
+ENRICH_LIMIT = 50  # max detail page fetches per run (overridden by --enrich-limit)
+_ENRICH_EMAIL_MAILTO = re.compile(
+    r'mailto:([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})', re.IGNORECASE
+)
+_ENRICH_EMAIL_PLAIN = re.compile(
+    r'\b([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b'
+)
+_ENRICH_VALUE = re.compile(
+    r'(?:Auftragswert|Estimated value|Gesch[äa]tzter Wert|Auftragswert inkl|Gesamtwert)[^€\d<]{0,80}'
+    r'([\d]{1,3}(?:[.\s]\d{3})*(?:[,\.]\d{1,2})?)\s*(?:EUR|€)',
+    re.IGNORECASE | re.DOTALL,
+)
+_ENRICH_VALUE_PLAIN = re.compile(
+    r'([\d]{1,3}(?:\.\d{3})+(?:,\d{2})?)\s*(?:EUR|€)', re.IGNORECASE
+)
+_ENRICH_CPV = re.compile(r'\b(\d{8})-\d\b')
+
+_ENRICH_SKIP_EMAILS = frozenset(
+    ["noreply", "no-reply", "mailer", "postmaster", "webmaster", "donotreply",
+     "info@example", "test@", ".png", ".jpg", ".gif", ".svg"]
+)
+
+
+def _fetch_enrich_html(url: str, timeout: int = 8) -> str:
+    """Fetch HTML from a detail page for field enrichment."""
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            return resp.read(300_000).decode(charset, errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_email_from_html(html: str) -> str:
+    """Extract first plausible contact email from HTML."""
+    for m in _ENRICH_EMAIL_MAILTO.finditer(html):
+        email = m.group(1).lower()
+        if not any(s in email for s in _ENRICH_SKIP_EMAILS):
+            return email
+    for m in _ENRICH_EMAIL_PLAIN.finditer(html):
+        email = m.group(1).lower()
+        if ("@" in email and "." in email.split("@")[-1]
+                and not any(s in email for s in _ENRICH_SKIP_EMAILS)):
+            return email
+    return ""
+
+
+def _extract_value_from_html(html: str) -> str:
+    """Extract estimated contract value (integer EUR string) from HTML."""
+    for pattern in (_ENRICH_VALUE, _ENRICH_VALUE_PLAIN):
+        m = pattern.search(html)
+        if m:
+            raw = m.group(1).replace(" ", "").replace(".", "").replace(",", ".")
+            try:
+                val = float(raw)
+                if 1_000 <= val <= 500_000_000:  # sanity range
+                    return str(int(val))
+            except ValueError:
+                pass
+    return ""
+
+
+def _extract_cpv_from_html(html: str) -> str:
+    """Extract CPV codes (format XXXXXXXX-X) from HTML."""
+    codes = list(dict.fromkeys(_ENRICH_CPV.findall(html)))[:5]
+    return ",".join(codes)
+
+
+def enrich_csv(output_path: Path, limit: int = ENRICH_LIMIT, verbose: bool = True) -> int:
+    """Post-process the just-written CSV: fetch detail pages for records with empty fields.
+
+    Returns the number of records actually enriched.
+    """
+    if not output_path.exists():
+        return 0
+
+    with open(output_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        records = list(reader)
+        fieldnames = reader.fieldnames or []
+
+    if not records:
+        return 0
+
+    candidates = [
+        r for r in records
+        if r.get("source", "TED") not in ("TED",)
+        and not r.get("buyer_email", "").strip()
+        and r.get("ted_url", "").strip()
+    ]
+
+    if not candidates:
+        return 0
+
+    to_process = candidates[:limit]
+    if verbose:
+        print(f"\n[Enrich] Збагачення деталей: {len(to_process)} / {len(candidates)} тендерів...")
+
+    enriched_count = 0
+    for rec in to_process:
+        url = rec["ted_url"].strip()
+        html = _fetch_enrich_html(url)
+        if not html:
+            continue
+        changed = False
+        if not rec.get("buyer_email", "").strip():
+            email = _extract_email_from_html(html)
+            if email:
+                rec["buyer_email"] = email
+                changed = True
+        if not rec.get("estimated_value_eur", "").strip():
+            value = _extract_value_from_html(html)
+            if value:
+                rec["estimated_value_eur"] = value
+                changed = True
+        if not rec.get("cpv_codes", "").strip():
+            cpv = _extract_cpv_from_html(html)
+            if cpv:
+                rec["cpv_codes"] = cpv
+                changed = True
+        if changed:
+            enriched_count += 1
+            if verbose:
+                title = rec.get("title", "")[:55]
+                email = rec.get("buyer_email", "-")
+                value = rec.get("estimated_value_eur", "-")
+                print(f"  ✓ {title} | email={email} | value={value}")
+
+    if enriched_count == 0:
+        return 0
+
+    tmp = output_path.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+    tmp.replace(output_path)
+
+    if verbose:
+        print(f"  ✓ Збагачено {enriched_count} тендерів → {output_path}")
+    return enriched_count
+
 
 # ── Dedup helpers ──────────────────────────────────────────────────────────────
 
@@ -2765,6 +2911,17 @@ def main():
         action="store_true",
         help="Перевірити доступність всіх джерел і вихід",
     )
+    parser.add_argument(
+        "--no-enrich",
+        action="store_true",
+        help="Пропустити автоматичне збагачення деталей тендерів (email, сума, CPV)",
+    )
+    parser.add_argument(
+        "--enrich-limit",
+        type=int,
+        default=ENRICH_LIMIT,
+        help=f"Максимум detail-сторінок за один запуск (default: {ENRICH_LIMIT})",
+    )
     args = parser.parse_args()
 
     verbose = not args.quiet
@@ -3081,12 +3238,19 @@ def main():
     if csv_file:
         csv_file.close()
 
+    # ── Enrichment (збагачення деталей: email, сума, CPV) ─────────────────────
+    enrich_count = 0
+    if total_records > 0 and not args.no_enrich:
+        enrich_count = enrich_csv(output_path, limit=args.enrich_limit, verbose=verbose)
+
     save_state(state)
 
     elapsed = time.time() - t0
 
     if verbose:
         print(f"\n  Результат: {total_records} тендерів (score ≥ {args.min_score})")
+        if enrich_count:
+            print(f"  Збагачено: {enrich_count} тендерів (email/сума/CPV з detail-сторінок)")
         print(f"  Час виконання: {elapsed:.1f} сек")
         if total_records:
             print(f"✓ Збережено → {output_path}")
@@ -3095,10 +3259,12 @@ def main():
 
     if not args.no_telegram:
         if total_records > 0:
+            enrich_line = f"📧 Збагачено: <b>{enrich_count}</b> email/сума/CPV\n" if enrich_count else ""
             msg = (
                 f"📋 <b>Tender Scraper — ГОТОВО</b>\n\n"
                 f"🌍 Регіон: {region}\n"
                 f"🏁 Тендерів: <b>{total_records}</b> (score ≥ {args.min_score})\n"
+                f"{enrich_line}"
                 f"📁 Файл: {output_path}\n"
                 f"⏱ Час: {elapsed:.0f} сек"
             )
