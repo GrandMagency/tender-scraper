@@ -18,9 +18,11 @@ Usage:
 
 import argparse
 import csv
+import html
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import urllib.parse
@@ -736,10 +738,14 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 def tg_notify(msg: str) -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_USER_ID")
-    if not token or not chat_id:
+    targets = _telegram_targets()
+    if not targets:
         return
+    for token, chat_id, label in targets:
+        _tg_send(token, chat_id, msg, label)
+
+
+def _tg_send(token: str, chat_id: str, msg: str, label: str) -> None:
     try:
         body = urllib.parse.urlencode({
             "chat_id": chat_id,
@@ -753,8 +759,193 @@ def tg_notify(msg: str) -> None:
             headers={"User-Agent": "WAT-tender-scraper/1.0"},
         )
         urllib.request.urlopen(req, timeout=8)
+    except Exception as e:
+        print(
+            f"WARN: Telegram send failed for {label} chat_id={chat_id}: {e}",
+            file=sys.stderr,
+        )
+
+
+def _telegram_targets() -> list[tuple[str, str, str]]:
+    """Return (bot_token, chat_id, label) targets for digest delivery."""
+    targets: list[tuple[str, str, str]] = []
+
+    primary_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    primary_chat = os.environ.get("TELEGRAM_USER_ID", "").strip()
+    if primary_token and primary_chat:
+        targets.append((primary_token, primary_chat, "summary-bot"))
+
+    hub_env = Path(os.environ.get("TENDER_DIGEST_HUB_ENV", "/opt/client-hub-bot/.env"))
+    hub = _read_env_file(hub_env)
+    hub_token = hub.get("TELEGRAM_BOT_TOKEN", "").strip()
+    hub_recipients = _split_csv(hub.get("TENDER_DIGEST_USER_IDS") or hub.get("ALLOWED_USER_IDS", ""))
+    for chat_id in hub_recipients:
+        if hub_token:
+            targets.append((hub_token, chat_id, "client-hub-bot"))
+
+    unique: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for token, chat_id, label in targets:
+        key = (token, chat_id)
+        if key not in seen:
+            unique.append((token, chat_id, label))
+            seen.add(key)
+    return unique
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                value = value.strip().strip('"').strip("'")
+                if " #" in value:
+                    value = value.split(" #", 1)[0].strip()
+                result[key.strip()] = value
+    except Exception as e:
+        print(f"WARN: Could not read Telegram hub env {path}: {e}", file=sys.stderr)
+    return result
+
+
+COUNTRY_FLAG = {"DE": "🇩🇪", "AT": "🇦🇹", "CH": "🇨🇭"}
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _h(value) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def _stars(score: int) -> str:
+    if score >= 80:
+        return "⭐⭐⭐"
+    if score >= 60:
+        return "⭐⭐"
+    return "⭐"
+
+
+def _load_tender_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
     except Exception:
-        pass
+        return []
+
+
+def _format_budget(value: str) -> str:
+    if not value:
+        return "бюджет невідомий"
+    try:
+        return f"€{int(float(value)):,}".replace(",", " ")
+    except ValueError:
+        return _h(value)
+
+
+def _format_deadline(rec: dict) -> str:
+    deadline = rec.get("deadline_date", "")
+    days_left = rec.get("days_until_deadline", "")
+    if deadline and days_left != "":
+        return f"{_h(deadline)} ({_h(days_left)} дн.)"
+    return _h(deadline or "—")
+
+
+def _source_label(source: str) -> str:
+    if source == "TED":
+        return "TED"
+    return source or "джерело"
+
+
+def format_telegram_digest(
+    *,
+    region: str,
+    records: list[dict],
+    added_ids: set[str],
+    dropped_count: int,
+    min_score: int,
+    days: int,
+    enrich_count: int,
+    top: int = 10,
+) -> str:
+    """Compact Telegram digest for the daily scraper run."""
+    today = date.today().strftime("%d.%m.%Y")
+    added_records = [r for r in records if r.get("tender_id") in added_ids]
+    highlight_records = added_records or records
+
+    country_counts: dict[str, int] = {}
+    for rec in highlight_records:
+        country = rec.get("buyer_country", "?")
+        country_counts[country] = country_counts.get(country, 0) + 1
+    country_str = " | ".join(
+        f"{COUNTRY_FLAG.get(c, '🌍')} {c}: {n}"
+        for c, n in sorted(country_counts.items())
+    )
+
+    lines = [
+        f"📋 <b>TENDER DIGEST — Solar Carport {region}</b>",
+        f"Регіон: {region} | {today}",
+        "",
+        f"🆕 Всього знайдено: <b>{len(records)}</b> | ✅ Нових (score ≥ {min_score}): <b>{len(added_records)}</b>",
+    ]
+    if country_str:
+        lines.append(country_str)
+    if dropped_count:
+        lines.append(f"➖ Вийшли зі зрізу: <b>{dropped_count}</b>")
+    if enrich_count:
+        lines.append(f"📧 Збагачено: <b>{enrich_count}</b> email/сума/CPV")
+
+    if not records:
+        lines.extend([
+            "",
+            f"✅ Нових тендерів не знайдено за останні {days} днів — база актуальна",
+        ])
+        return "\n".join(lines)
+
+    sorted_records = sorted(
+        highlight_records,
+        key=lambda r: -_safe_int(r.get("priority_score", 0)),
+    )[:top]
+
+    top_label = "НОВІ" if added_records else "АКТУАЛЬНІ"
+    lines.extend(["", f"🔥 ТОП {len(sorted_records)} ({top_label}):", ""])
+
+    for i, rec in enumerate(sorted_records, 1):
+        score = _safe_int(rec.get("priority_score", 0))
+        country = rec.get("buyer_country", "?")
+        flag = COUNTRY_FLAG.get(country, "🌍")
+        buyer = _h(rec.get("buyer_name") or "—")
+        title = _h((rec.get("title") or rec.get("publication_number") or "—")[:100])
+        budget = _format_budget(rec.get("estimated_value_eur", ""))
+        email = rec.get("buyer_email", "")
+        url = rec.get("ted_url", "")
+        source = _h(_source_label(rec.get("source", "")))
+
+        lines.append(f"{i}. {_stars(score)} {flag} <b>{buyer}</b>")
+        lines.append(f"   📄 {title}")
+        lines.append(f"   💰 {budget} | 📅 {_format_deadline(rec)} | Score: {score}")
+        if email:
+            lines.append(f"   📧 {_h(email)}")
+        if url:
+            lines.append(f'   🔗 <a href="{_h(url)}">{source}</a>')
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 # ── Bund.de RSS scraper ────────────────────────────────────────────────────────
@@ -2935,6 +3126,27 @@ def main():
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    previous_ids: set[str] = set()
+    previous_backup_path: Path | None = None
+    if output_path.exists():
+        try:
+            with output_path.open(newline="", encoding="utf-8") as prev_file:
+                for row in csv.DictReader(prev_file):
+                    tid = row.get("tender_id")
+                    if tid:
+                        previous_ids.add(tid)
+            backup_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            previous_backup_path = output_path.with_name(
+                f"{output_path.stem}_before_{backup_stamp}{output_path.suffix}"
+            )
+            shutil.copy2(output_path, previous_backup_path)
+        except Exception:
+            previous_ids = set()
+            previous_backup_path = None
+    previous_count = len(previous_ids)
+    current_ids: set[str] = set()
+    added_ids: set[str] = set()
+
     # Які джерела активні для цього регіону
     active_sources: list[str] = []
     if args.source in ("all", "ted"):
@@ -3018,6 +3230,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3037,6 +3252,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3053,6 +3271,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3069,6 +3290,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3085,6 +3309,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3101,6 +3328,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3117,6 +3347,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3133,6 +3366,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3149,6 +3385,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3165,6 +3404,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3181,6 +3423,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3197,6 +3442,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3213,6 +3461,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3229,6 +3480,9 @@ def main():
             writer.writerow(_clean_record(record))
             csv_file.flush()
             seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
             if not args.no_dedup:
                 state["tenders"][record["tender_id"]] = record["publication_number"]
             total_records += 1
@@ -3258,21 +3512,19 @@ def main():
             print("  Нічого не знайдено. Спробуй: --min-score 0 або --days 90")
 
     if not args.no_telegram:
-        if total_records > 0:
-            enrich_line = f"📧 Збагачено: <b>{enrich_count}</b> email/сума/CPV\n" if enrich_count else ""
-            msg = (
-                f"📋 <b>Tender Scraper — ГОТОВО</b>\n\n"
-                f"🌍 Регіон: {region}\n"
-                f"🏁 Тендерів: <b>{total_records}</b> (score ≥ {args.min_score})\n"
-                f"{enrich_line}"
-                f"📁 Файл: {output_path}\n"
-                f"⏱ Час: {elapsed:.0f} сек"
-            )
-        else:
-            msg = (
-                f"📋 <b>Tender Scraper</b> — нових тендерів не знайдено\n"
-                f"🌍 {region} | останні {args.days} днів"
-            )
+        added_count = len(added_ids)
+        dropped_count = len(previous_ids - current_ids)
+        records = _load_tender_records(output_path) if total_records > 0 else []
+        msg = format_telegram_digest(
+            region=region,
+            records=records,
+            added_ids=added_ids,
+            dropped_count=dropped_count,
+            min_score=args.min_score,
+            days=args.days,
+            enrich_count=enrich_count,
+            top=10,
+        )
         tg_notify(msg)
 
 
