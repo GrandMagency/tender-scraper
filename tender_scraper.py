@@ -764,10 +764,21 @@ def _telegram_targets() -> list[tuple[str, str, str]]:
     if primary_token and primary_chat:
         targets.append((primary_token, primary_chat, "summary-bot"))
 
+    # TENDER_DIGEST_HUB_ENV: явний шлях або дефолт /opt/client-hub-bot/.env якщо існує
     hub_env_path = os.environ.get("TENDER_DIGEST_HUB_ENV", "").strip()
-    hub_env = Path(hub_env_path) if hub_env_path else None
+    if not hub_env_path:
+        fallback = Path("/opt/client-hub-bot/.env")
+        hub_env = fallback if fallback.exists() else None
+    else:
+        hub_env = Path(hub_env_path)
     if hub_env is None:
-        return unique if unique else targets
+        unique = []
+        seen: set[tuple[str, str]] = set()
+        for token, chat_id, label in targets:
+            if (token, chat_id) not in seen:
+                unique.append((token, chat_id, label))
+                seen.add((token, chat_id))
+        return unique
     hub = _read_env_file(hub_env)
     hub_token = hub.get("TELEGRAM_BOT_TOKEN", "").strip()
     hub_recipients = _split_csv(hub.get("TENDER_DIGEST_USER_IDS") or hub.get("ALLOWED_USER_IDS", ""))
