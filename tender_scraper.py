@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 tender_scraper.py — WAT Tool
-Пошук тендерів на solar carport/PV через TED API (Tenders Electronic Daily, ЄС).
-Фільтр: CPV-коди + ключові слова в назві, DACH (DE/AT/CH), scoring 0–100.
+Пошук тендерів через TED API (ЄС), bund.de, simap.ch, DAB.de.
+Фільтр: CPV-коди + ключові слова, DACH (DE/AT/CH), scoring 0–100.
 
+Конфігурація: config.json (ключові слова, CPV коди).
 Вихід: output/tenders_<region>_<date>.csv
 State:  .state.json (dedup між запусками)
 
@@ -49,33 +50,33 @@ REGION_TO_COUNTRIES = {
 
 COUNTRY_ALPHA2 = {"DEU": "DE", "AUT": "AT", "CHE": "CH"}
 
-# ── Ключові слова для solar carport ───────────────────────────────────────────
-# TED API query: оператор ~ шукає підрядок у notice-title
-# Перевірено: "Solarcarport", "Carport" (з AND Solar), "Parkplatz" (з AND PV) — дають результати
+# ── Конфіг з config.json ──────────────────────────────────────────────────────
+def _load_config() -> dict:
+    path = Path(__file__).parent / "config.json"
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-# Група 1: явний "Carport" або специфічний parking-solar термін
-CARPORT_KEYWORDS = [
-    "Solarcarport", "Solar-Carport",
-    "PV-Carport",
-    "Carport-PV-Anlage",                  # Photovoltaikanlage auf Carport
-    "Photovoltaik-Parkplatzüberdachung",  # compound form used by many municipalities
-    "Solardach",                          # glass solar roof systems (e.g. Glas-Solardach-System)
-    "Carport",               # буде зʼєднано AND з PV у query
-    "Parkplatzüberdachung",  # "накриття паркінгу" — настільки специфічний, що AND Solar не треба
-]
+_CFG = _load_config()
+_KW  = _CFG.get("keywords", {})
 
-# Група 2: паркінг + PV (Parkplatz + Photovoltaik/Solar/PV)
-PARKING_PV_TERMS = [
-    "Parkplatz", "Parkhaus", "Stellplatz", "Parkdeck",
-    "Überdachung",            # "дах/навіс" — буде AND Solar у query
-]
-SOLAR_TERMS      = ["Photovoltaik", "Solar", "PV-Anlage"]
+# ── Ключові слова (з config.json або дефолтні) ────────────────────────────────
+CARPORT_KEYWORDS = _KW.get("primary", [
+    "Solarcarport", "Solar-Carport", "PV-Carport",
+    "Carport-PV-Anlage", "Photovoltaik-Parkplatzüberdachung",
+    "Solardach", "Carport", "Parkplatzüberdachung",
+])
+PARKING_PV_TERMS = _KW.get("parking_pv", [
+    "Parkplatz", "Parkhaus", "Stellplatz", "Parkdeck", "Überdachung",
+])
+SOLAR_TERMS = _KW.get("solar_terms", ["Photovoltaik", "Solar", "PV-Anlage"])
 
-# Для keyword_match та scoring: всі ключові слова разом
 SOLAR_KEYWORDS = CARPORT_KEYWORDS + PARKING_PV_TERMS + SOLAR_TERMS
+BUND_KEYWORDS  = SOLAR_KEYWORDS
 
-# CPV тільки для скорингу (не для query)
-SOLAR_CPV_PREFIXES = {
+# CPV коди для скорингу (з config.json або дефолтні)
+SOLAR_CPV_PREFIXES: dict[str, str] = _CFG.get("cpv_codes", {
     "09331200": "Solar photovoltaic modules",
     "09332000": "Solar installation",
     "45261215": "Solar panel roof-covering work",
@@ -84,10 +85,7 @@ SOLAR_CPV_PREFIXES = {
     "45223200": "Structural work",
     "45310000": "Electrical installation work",
     "45315700": "Switching station fitting",
-}
-
-# bund.de: ті самі групи
-BUND_KEYWORDS = SOLAR_KEYWORDS
+})
 
 # ── TED API fields для запиту ──────────────────────────────────────────────────
 TED_FIELDS = [
@@ -114,15 +112,11 @@ BUND_RSS_URL = (
 # ── simap.ch (Швейцарія) — REST API (знайдено через DevTools 2026-04-21) ────────
 SIMAP_API_URL = "https://www.simap.ch/rest/publications/v2/project/project-search"
 # Примітка: "solarcarport" (1 слово) → 0 результатів у базі; "solar carport" (2 слова) → є
-SIMAP_SEARCH_TERMS = [
-    "solar carport",
-    "carport",
-    "photovoltaik carport",
-    "parkplatz photovoltaik",
-    "parkhaus solar",
-    "überdachung photovoltaik",
-    "carport pv anlage",  # simap needs space-separated terms
-]
+SIMAP_SEARCH_TERMS = _CFG.get("simap_terms", [
+    "solar carport", "carport", "photovoltaik carport",
+    "parkplatz photovoltaik", "parkhaus solar",
+    "überdachung photovoltaik", "carport pv anlage",
+])
 
 # ── vergabe.nrw.de (NRW, Німеччина) ────────────────────────────────────────────
 VERGABE_NRW_RSS = "https://www.vergabe.nrw.de/rss.xml"
@@ -162,16 +156,11 @@ DAB_SEARCH_URL = (
 DAB_BASE_URL = "https://www.deutsches-ausschreibungsblatt.de"
 # Примітка: "solarcarport" (1 слово) → 1 результат; "solar carport" → 169
 # Всі результати повертаються одним запитом без пагінації
-DAB_SEARCH_TERMS = [
-    "solar carport",
-    "photovoltaik carport",
-    "parkplatz photovoltaik",
-    "parkhaus solar",
-    "parkplatzüberdachung",
-    "carport pv-anlage",                  # Carport-PV-Anlage variant
-    "photovoltaik parkplatzüberdachung",  # Photovoltaik-Parkplatzüberdachung variant
-    "parkplatzüberdachung pv-anlage",     # explicit combo
-]
+DAB_SEARCH_TERMS = _CFG.get("dab_terms", [
+    "solar carport", "photovoltaik carport", "parkplatz photovoltaik",
+    "parkhaus solar", "parkplatzüberdachung", "carport pv-anlage",
+    "photovoltaik parkplatzüberdachung", "parkplatzüberdachung pv-anlage",
+])
 # vergabetyp: 1=Ausschreibung (активний), 2=Vergabe (в процесі), 3=Vergebener Auftrag (виданий)
 DAB_VERGABETYP_LABELS = {1: "Ausschreibung", 2: "Vergabe", 3: "Vergebener Auftrag"}
 

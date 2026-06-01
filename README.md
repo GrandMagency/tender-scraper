@@ -47,12 +47,28 @@ TELEGRAM_USER_ID=987654321
 
 ### Крок 2 — Ключові слова під нішу клієнта
 
-Відкрий `tender_scraper.py`, рядки **57–87** — там `CARPORT_KEYWORDS`, `PARKING_PV_TERMS`, `SOLAR_CPV_PREFIXES`.
+Відкрий `config.json` і замінити на ключові слова ніші клієнта. **Код не чіпаємо.**
 
-Замінити на ключові слова ніші клієнта. Приклади:
+```json
+{
+  "profile": "Назва клієнта / ніша",
+  "keywords": {
+    "primary":     ["Головне ключове слово 1", "Головне слово 2"],
+    "parking_pv":  ["Суміжне слово 1", "Суміжне слово 2"],
+    "solar_terms": ["Уточнювач 1", "Уточнювач 2"]
+  },
+  "cpv_codes": {
+    "XXXXXXXX": "Опис коду"
+  },
+  "simap_terms": ["term for simap.ch search"],
+  "dab_terms":   ["term for dab.de search"]
+}
+```
 
-| Ніша | Ключові слова | CPV префікси |
-|------|--------------|-------------|
+Приклади для різних ніш:
+
+| Ніша | `primary` keywords | CPV префікси |
+|------|--------------------|-------------|
 | Solar carport (default) | Solarcarport, PV-Carport, Solardach | 09331200, 45261215 |
 | IT-закупівлі | Software, IT-Dienstleistung, Digitalisierung | 72000000, 48000000 |
 | Будівництво | Hochbau, Tiefbau, Sanierung | 45000000, 45210000 |
@@ -168,10 +184,11 @@ crontab -e
 
 ```
 tender-scraper/
+├── config.json          # ← ключові слова і CPV коди (міняти для кожного клієнта)
+├── .env.example         # ← шаблон токенів (cp .env.example .env)
 ├── tender_scraper.py    # головний скрапер (TED + bund.de + SIMAP)
 ├── tender_digest.py     # тижневий дайджест → Telegram
 ├── tender_viewer.html   # локальний браузер CSV (відкрити у браузері)
-├── .env.example         # шаблон конфігурації
 ├── requirements.txt     # порожній — тільки stdlib
 ├── output/              # CSV виходи (gitignored)
 └── .state.json          # dedup стан між запусками (gitignored)
@@ -179,17 +196,20 @@ tender-scraper/
 
 ---
 
-## Перелік того що треба зробити для нового клієнта
+## Чекліст для нового клієнта
 
-- [ ] Створити Telegram бота (@BotFather) — отримати токен
-- [ ] Заповнити `.env` (токен + chat_id)
-- [ ] Замінити ключові слова і CPV коди (рядки 57–87 у `tender_scraper.py`)
-- [ ] Тест запуску: `python tender_scraper.py --dry-run`
-- [ ] Тест результату: `python tender_scraper.py --region DE --days 30 --no-telegram`
-- [ ] Перевірити CSV — чи є релевантні тендери
-- [ ] Налаштувати cron на VPS
-- [ ] Перший реальний запуск з Telegram
-- [ ] (Опціонально) Додати API ключ для AI-аналізу (Level 2 або 3)
+```
+[ ] git clone https://github.com/GrandMagency/tender-scraper.git
+[ ] cp .env.example .env  →  вставити TELEGRAM_BOT_TOKEN + TELEGRAM_USER_ID
+[ ] Відредагувати config.json  →  profile + keywords + cpv_codes під нішу клієнта
+[ ] python tender_scraper.py --dry-run  →  перевірити що запит виглядає правильно
+[ ] python tender_scraper.py --region DE --days 30 --no-telegram  →  перевірити CSV
+[ ] Переглянути output/ — відкрити tender_viewer.html у браузері для зручного перегляду
+[ ] python tender_scraper.py  →  перший реальний запуск з Telegram
+[ ] python tender_digest.py   →  тест дайджесту
+[ ] Налаштувати cron на VPS (дивись розділ "Автоматизація")
+[ ] (Опціонально) Додати ANTHROPIC_API_KEY або OPENAI_API_KEY в .env для AI-аналізу
+```
 
 ---
 
