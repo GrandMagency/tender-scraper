@@ -775,7 +775,10 @@ def _telegram_targets() -> list[tuple[str, str, str]]:
     if primary_token and primary_chat:
         targets.append((primary_token, primary_chat, "summary-bot"))
 
-    hub_env = Path(os.environ.get("TENDER_DIGEST_HUB_ENV", "/opt/client-hub-bot/.env"))
+    hub_env_path = os.environ.get("TENDER_DIGEST_HUB_ENV", "").strip()
+    hub_env = Path(hub_env_path) if hub_env_path else None
+    if hub_env is None:
+        return unique if unique else targets
     hub = _read_env_file(hub_env)
     hub_token = hub.get("TELEGRAM_BOT_TOKEN", "").strip()
     hub_recipients = _split_csv(hub.get("TENDER_DIGEST_USER_IDS") or hub.get("ALLOWED_USER_IDS", ""))
