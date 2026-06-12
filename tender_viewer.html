@@ -6,14 +6,14 @@
 <meta name="robots" content="noindex, nofollow">
 <title>📋 Tender Leads — Solar Carport DACH</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
     background: #0d0d1a;
     color: #eeeeee;
-    font-family: 'Montserrat', sans-serif;
+    font-family: 'Geist', sans-serif;
     font-size: 13px;
     min-height: 100vh;
     overflow-x: auto;
@@ -22,7 +22,7 @@
   /* ── Header ─────────────────────────────────────────────────────────── */
   .header {
     background: #141414;
-    border-bottom: 2px solid #A002B2;
+    border-bottom: 2px solid #B8156B;
     padding: 14px 32px;
     display: flex;
     align-items: center;
@@ -34,7 +34,7 @@
   .header h1 {
     font-size: 18px;
     font-weight: 700;
-    background: linear-gradient(90deg, #A002B2, #D946EF);
+    background: linear-gradient(90deg, #B8156B, #E8237D);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     white-space: nowrap;
@@ -75,12 +75,12 @@
   input[type="text"] { width: 220px; }
   input[type="number"] { width: 90px; }
   select { min-width: 120px; }
-  input:focus, select:focus { border-color: #D946EF; box-shadow: 0 0 0 2px rgba(169,2,178,0.15); }
+  input:focus, select:focus { border-color: #E8237D; box-shadow: 0 0 0 2px rgba(184,21,107,0.15); }
   input::placeholder { color: #555; }
   select option { background: #1a1a2e; }
 
   .btn {
-    background: linear-gradient(135deg, #A002B2, #D946EF);
+    background: linear-gradient(135deg, #B8156B, #E8237D);
     color: #fff;
     border: none;
     padding: 8px 18px;
@@ -94,7 +94,7 @@
   }
   .btn:hover { opacity: 0.85; }
   .btn.secondary { background: transparent; border: 1px solid #3a2a5a; color: #ccc; }
-  .btn.secondary:hover { border-color: #D946EF; color: #fff; }
+  .btn.secondary:hover { border-color: #E8237D; color: #fff; }
   .btn.export { background: transparent; border: 1px solid #1a4a2a; color: #44cc77; }
   .btn.export:hover { background: #0a2a15; border-color: #44cc77; }
 
@@ -112,9 +112,9 @@
     font-weight: 600;
     transition: all 0.15s;
   }
-  .days-btn:hover { border-color: #A002B2; color: #ccc; }
+  .days-btn:hover { border-color: #B8156B; color: #ccc; }
   .days-btn.active {
-    background: linear-gradient(135deg, #A002B2, #D946EF);
+    background: linear-gradient(135deg, #B8156B, #E8237D);
     border-color: transparent;
     color: #fff;
   }
@@ -130,7 +130,7 @@
     letter-spacing: 0.7px;
     padding: 11px 10px;
     text-align: left;
-    border-bottom: 2px solid #A002B2;
+    border-bottom: 2px solid #B8156B;
     white-space: nowrap;
     cursor: pointer;
     user-select: none;
@@ -139,8 +139,8 @@
     z-index: 10;
   }
   thead th:hover { color: #fff; background: #22223a; }
-  thead th.sorted-asc::after  { content: ' ↑'; color: #A002B2; }
-  thead th.sorted-desc::after { content: ' ↓'; color: #A002B2; }
+  thead th.sorted-asc::after  { content: ' ↑'; color: #B8156B; }
+  thead th.sorted-desc::after { content: ' ↓'; color: #B8156B; }
   thead th.no-sort { cursor: default; }
   thead th.no-sort:hover { color: #ccc; background: #1a1a2e; }
 
@@ -160,7 +160,7 @@
     font-weight: 700;
     padding: 0 7px;
   }
-  .score-high   { background: #1a0a20; color: #D946EF; border: 1px solid #5a0a7a; }
+  .score-high   { background: #1a0a20; color: #E8237D; border: 1px solid #5a0a7a; }
   .score-mid    { background: #0a1a30; color: #60a5fa; border: 1px solid #1a3a6a; }
   .score-low    { background: #1a1a2e; color: #888; border: 1px solid #2a2a3e; }
 
@@ -170,7 +170,7 @@
   /* Buyer name */
   td.buyer { color: #fff; font-weight: 600; max-width: 180px; }
   td.title-col { color: #ddd; max-width: 220px; font-size: 12px; }
-  td.budget { color: #D946EF; font-weight: 600; white-space: nowrap; }
+  td.budget { color: #E8237D; font-weight: 600; white-space: nowrap; }
   td.deadline { color: #ddd; white-space: nowrap; }
   td.days { font-weight: 600; }
 
@@ -201,7 +201,7 @@
 
   /* TED link */
   a.ted-link {
-    color: #A002B2;
+    color: #B8156B;
     text-decoration: none;
     font-size: 11px;
     padding: 3px 8px;
@@ -211,7 +211,7 @@
     display: inline-block;
     transition: all 0.15s;
   }
-  a.ted-link:hover { background: #A002B2; color: #fff; }
+  a.ted-link:hover { background: #B8156B; color: #fff; }
 
   /* Source badge */
   .src-badge {
@@ -256,7 +256,7 @@
     background: #1a1a2e; border: 1px solid #2a2a3e; color: #aaa;
     padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; transition: all 0.15s;
   }
-  .page-btn:hover, .page-btn.active { border-color: #A002B2; color: #eee; }
+  .page-btn:hover, .page-btn.active { border-color: #B8156B; color: #eee; }
   .page-btn:disabled { opacity: 0.3; cursor: default; }
 
   /* ── Loading / Drop ─────────────────────────────────────────────────── */
@@ -265,11 +265,11 @@
     border: 2px dashed #3a2a4a; border-radius: 16px; padding: 48px 32px;
     margin: 32px auto; max-width: 480px; cursor: pointer; transition: all 0.2s; background: #0f0f1e;
   }
-  .drop-zone:hover, .drop-zone.drag-over { border-color: #A002B2; background: #140a1e; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #B8156B; background: #140a1e; }
   .drop-zone h2 { font-size: 15px; color: #eee; margin-bottom: 8px; }
   .drop-zone p { font-size: 12px; color: #777; margin-bottom: 20px; }
   .spinner {
-    width: 32px; height: 32px; border: 3px solid #2a2a2e; border-top-color: #A002B2;
+    width: 32px; height: 32px; border: 3px solid #2a2a2e; border-top-color: #B8156B;
     border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -293,7 +293,7 @@
     flex-shrink: 0;
     align-self: center;
   }
-  .filter-toggle-btn:hover, .filter-toggle-btn.open { border-color: #D946EF; color: #fff; }
+  .filter-toggle-btn:hover, .filter-toggle-btn.open { border-color: #E8237D; color: #fff; }
 
   @media (max-width: 768px) {
     body { font-size: 12px; overflow-x: hidden; }
@@ -367,10 +367,10 @@
 <div class="header">
   <h1 style="display:flex;align-items:center;gap:10px;background:none;-webkit-text-fill-color:initial">
     <span style="font-family:Unbounded,sans-serif;font-weight:700;font-size:18px;letter-spacing:-0.02em"><span style="color:#C004D8;-webkit-text-fill-color:#C004D8">.</span><span style="color:#F4F1EA;-webkit-text-fill-color:#F4F1EA">grandma</span></span>
-    <span style="background:linear-gradient(135deg,#A003B2,#C004D8);color:#fff;-webkit-text-fill-color:#fff;-webkit-background-clip:unset;background-clip:unset;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;padding:3px 8px;border-radius:20px;letter-spacing:0.1em;text-transform:lowercase;white-space:nowrap">scraper</span>
+    <span style="background:linear-gradient(135deg,#B8156B,#C004D8);color:#fff;-webkit-text-fill-color:#fff;-webkit-background-clip:unset;background-clip:unset;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;padding:3px 8px;border-radius:20px;letter-spacing:0.1em;text-transform:lowercase;white-space:nowrap">scraper</span>
   </h1>
   <div style="display:flex;align-items:center;gap:8px">
-    <a href="./parking_viewer.html" style="font-size:11px;color:#A003B2;text-decoration:none;border:1px solid #A003B2;border-radius:4px;padding:3px 8px;white-space:nowrap" title="Parking Leads">🅿 Parking View</a>
+    <a href="./parking_viewer.html" style="font-size:11px;color:#B8156B;text-decoration:none;border:1px solid #B8156B;border-radius:4px;padding:3px 8px;white-space:nowrap" title="Parking Leads">🅿 Parking View</a>
     <button class="filter-toggle-btn" id="filter-toggle" onclick="toggleFilters()">Фільтри ▼</button>
   </div>
   <div class="stats-bar">
