@@ -5,3 +5,4 @@ output/
 .tmp/
 .state.json
 *.csv
+*.bak

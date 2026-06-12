@@ -33,6 +33,13 @@ from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+__version__ = "1.1.0"
+
+# User-Agent варіанти (версія синхронізована з __version__)
+UA_FULL = f"WAT-tender-scraper/{__version__} (grandma.agency)"
+UA_SHORT = f"WAT-tender-scraper/{__version__}"
+UA_BROWSER = f"Mozilla/5.0 (compatible; WAT-tender-scraper/{__version__}; +https://grandma.agency)"
+
 # ── TED API (v3, eForms) ───────────────────────────────────────────────────────
 TED_SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
 REQUEST_TIMEOUT = 30   # секунди
@@ -99,6 +106,7 @@ TED_FIELDS = [
     "deadline-date-lot",      # Дедлайн
     "estimated-value-lot",    # Бюджет (lot)
     "estimated-value-proc",   # Бюджет (procedure)
+    "estimated-value-glo",    # Бюджет (global estimate)
     "classification-cpv",     # CPV-коди (list)
     "notice-type",            # Тип тендера
 ]
@@ -316,18 +324,46 @@ def enrich_csv(output_path: Path, limit: int = ENRICH_LIMIT, verbose: bool = Tru
 
 # ── Dedup helpers ──────────────────────────────────────────────────────────────
 
+STATE_TTL_DAYS = 540  # > дефолтного вікна пошуку (365д), щоб старі тендери не "воскресали"
+
+
 def load_state() -> dict:
+    state = {"tenders": {}, "last_digest_run": None, "digest_tenders": {},
+             "tender_dates": {}, "source_stats": {}}
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE, encoding="utf-8") as f:
-                return json.load(f)
+                state.update(json.load(f))
         except Exception:
             pass
-    return {"tenders": {}, "last_digest_run": None, "digest_tenders": {}}
+    state.setdefault("tender_dates", {})
+    state.setdefault("source_stats", {})
+    return state
+
+
+def prune_state(state: dict) -> int:
+    """TTL-очистка: видаляє тендери, вперше побачені понад STATE_TTL_DAYS тому.
+
+    ID без дати (старий формат стану) отримують сьогоднішню дату — підуть
+    у чистку через STATE_TTL_DAYS. Повертає кількість видалених записів.
+    """
+    today_iso = date.today().isoformat()
+    dates = state.setdefault("tender_dates", {})
+    for tid in set(state.get("tenders", {})) | set(state.get("digest_tenders", {})):
+        dates.setdefault(tid, today_iso)
+
+    cutoff = (date.today() - timedelta(days=STATE_TTL_DAYS)).isoformat()
+    expired = [tid for tid, d in dates.items() if d < cutoff]
+    for tid in expired:
+        dates.pop(tid, None)
+        state.get("tenders", {}).pop(tid, None)
+        state.get("digest_tenders", {}).pop(tid, None)
+    return len(expired)
 
 
 def save_state(state: dict) -> None:
-    """Атомний запис .state.json."""
+    """Атомний запис .state.json (з TTL-очисткою старих записів)."""
+    prune_state(state)
     tmp = STATE_FILE.with_suffix(".json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -340,46 +376,70 @@ def make_tender_id(pub_number: str) -> str:
 
 
 # ── Scoring (0–100) ────────────────────────────────────────────────────────────
+# Ваги можна перевизначити в config.json у блоці "scoring" (код не чіпаємо).
+
+_SCORING_DEFAULTS = {
+    "cpv_exact": 40,
+    "cpv_partial": 25,
+    "keywords_3plus": 30,
+    "keywords_2": 20,
+    "keywords_1": 10,
+    "budget_large": 20,
+    "budget_medium": 15,
+    "budget_small": 5,
+    "budget_unknown": 5,
+    "budget_large_min_eur": 500_000,
+    "budget_medium_min_eur": 50_000,
+    "deadline_optimal": 10,
+    "deadline_urgent": 2,
+    "deadline_far": 5,
+    "deadline_optimal_min_days": 10,
+    "deadline_optimal_max_days": 45,
+    "ft_base": 15,
+}
+_SCORING = {**_SCORING_DEFAULTS, **_CFG.get("scoring", {})}
+
 
 def score_tender(cpv_codes: list[str], keywords_found: list[str],
                  value_eur: float | None, days_left: int | None) -> int:
+    w = _SCORING
     score = 0
 
-    # CPV-match (0–40)
+    # CPV-match
     matched_cpv = [c for c in cpv_codes if any(c.startswith(p) for p in SOLAR_CPV_PREFIXES)]
     if matched_cpv:
-        score += 40
+        score += w["cpv_exact"]
     elif any(c[:4] in ["0933", "4526", "4422", "4523", "4521", "4522", "4531"] for c in cpv_codes):
-        score += 25
+        score += w["cpv_partial"]
 
-    # Keyword-match (0–30)
+    # Keyword-match
     kw_count = len(keywords_found)
     if kw_count >= 3:
-        score += 30
+        score += w["keywords_3plus"]
     elif kw_count == 2:
-        score += 20
+        score += w["keywords_2"]
     elif kw_count == 1:
-        score += 10
+        score += w["keywords_1"]
 
-    # Бюджет (0–20): більший бюджет = вищий score
+    # Бюджет: більший бюджет = вищий score
     if value_eur:
-        if value_eur >= 500_000:
-            score += 20
-        elif value_eur >= 50_000:
-            score += 15
+        if value_eur >= w["budget_large_min_eur"]:
+            score += w["budget_large"]
+        elif value_eur >= w["budget_medium_min_eur"]:
+            score += w["budget_medium"]
         else:
-            score += 5
+            score += w["budget_small"]
     else:
-        score += 5  # невідомий — мінімум
+        score += w["budget_unknown"]  # невідомий — мінімум
 
-    # Дедлайн (0–10): 10–45д = оптимальне вікно для відповіді
+    # Дедлайн: оптимальне вікно для відповіді
     if days_left is not None:
-        if 10 <= days_left <= 45:
-            score += 10
-        elif days_left < 10:
-            score += 2   # занадто терміново
+        if w["deadline_optimal_min_days"] <= days_left <= w["deadline_optimal_max_days"]:
+            score += w["deadline_optimal"]
+        elif days_left < w["deadline_optimal_min_days"]:
+            score += w["deadline_urgent"]   # занадто терміново
         else:
-            score += 5   # >45д — ще є час
+            score += w["deadline_far"]      # ще є час
 
     return min(score, 100)
 
@@ -449,7 +509,7 @@ def fetch_page(payload: dict, verbose: bool = False) -> dict | None:
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+            "User-Agent": UA_FULL,
         },
         method="POST",
     )
@@ -577,32 +637,42 @@ def parse_date(val) -> str:
     return s.replace("T", "")[:10]
 
 
+def _parse_value_item(v) -> float | None:
+    """Одне значення бюджету: число, рядок або об'єкт {amount/value, currency}."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        amt = v.get("amount") or v.get("value")
+        if amt is not None:
+            return _parse_value_item(amt)
+        return None
+    if isinstance(v, str):
+        try:
+            return float(v.replace(",", "").replace(" ", ""))
+        except ValueError:
+            return None
+    return None
+
+
 def extract_value(notice: dict) -> float | None:
-    """Витягує estimated value в EUR."""
-    for key in ["estimated-value-lot", "estimated-value-proc", "estimated-value-glo"]:
+    """Витягує estimated value в EUR.
+
+    Пріоритет: бюджет всієї процедури (proc/glo) > лоти. Для багатолотових
+    тендерів зі списком значень беремо суму лотів — раніше брався лише
+    перший лот, що занижувало бюджет і score.
+    """
+    for key in ["estimated-value-proc", "estimated-value-glo", "estimated-value-lot"]:
         v = notice.get(key)
         if v is None:
             continue
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(v, list) and v:
-            # Може бути список об'єктів {amount, currency}
-            first = v[0]
-            if isinstance(first, (int, float)):
-                return float(first)
-            if isinstance(first, dict):
-                amt = first.get("amount") or first.get("value")
-                if amt:
-                    return float(amt)
-        if isinstance(v, dict):
-            amt = v.get("amount") or v.get("value")
-            if amt:
-                return float(amt)
-        if isinstance(v, str):
-            try:
-                return float(v.replace(",", "").replace(" ", ""))
-            except ValueError:
-                pass
+        if isinstance(v, list):
+            parsed = [x for x in (_parse_value_item(i) for i in v) if x]
+            if parsed:
+                return sum(parsed) if key == "estimated-value-lot" else max(parsed)
+            continue
+        result = _parse_value_item(v)
+        if result:
+            return result
     return None
 
 
@@ -684,7 +754,7 @@ def process_notice(notice: dict, seen_ids: set, state: dict,
     # Якщо немає keywords у заголовку → FT-only match (keyword у тілі документа).
     # Базовий бонус 15 гарантує що FT-ліди проходять min-score=20.
     # Примітка: cpv_codes може бути непорожнім з нерелевантними кодами — не враховуємо.
-    ft_base = 15 if not keywords_found else 0
+    ft_base = _SCORING["ft_base"] if not keywords_found else 0
     priority_score = ft_base + score_tender(cpv_codes, keywords_found, value_eur, days_left)
 
     if priority_score < min_score:
@@ -745,7 +815,7 @@ def _tg_send(token: str, chat_id: str, msg: str, label: str) -> None:
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=body,
-            headers={"User-Agent": "WAT-tender-scraper/1.0"},
+            headers={"User-Agent": UA_SHORT},
         )
         urllib.request.urlopen(req, timeout=8)
     except Exception as e:
@@ -768,7 +838,7 @@ def _telegram_targets() -> list[tuple[str, str, str]]:
     hub_env_path = os.environ.get("TENDER_DIGEST_HUB_ENV", "").strip()
     if not hub_env_path:
         fallback = Path("/opt/client-hub-bot/.env")
-        hub_env = fallback if fallback.exists() else None
+        hub_env = fallback if _path_exists(fallback) else None
     else:
         hub_env = Path(hub_env_path)
     if hub_env is None:
@@ -800,8 +870,16 @@ def _split_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError as e:
+        print(f"WARN: Could not access optional Telegram hub env {path}: {e}", file=sys.stderr)
+        return False
+
+
 def _read_env_file(path: Path) -> dict[str, str]:
-    if not path.exists():
+    if not _path_exists(path):
         return {}
     result: dict[str, str] = {}
     try:
@@ -875,6 +953,28 @@ def _source_label(source: str) -> str:
     return source or "джерело"
 
 
+ZERO_STREAK_ALERT = 4  # стільки запусків підряд з 0 результатів = підозра, що джерело зламалось
+
+
+def build_health_lines(run_stats: dict, source_stats: dict) -> list[str]:
+    """Рядки для Telegram: скільки віддало кожне джерело + алерти про мертві."""
+    if not run_stats:
+        return []
+    lines = ["📡 " + " · ".join(
+        f"{st['label']} {st['fetched']}" for st in run_stats.values()
+    )]
+    for key, st in run_stats.items():
+        ss = source_stats.get(key, {})
+        streak = ss.get("zero_streak", 0)
+        if streak >= ZERO_STREAK_ALERT:
+            last = ss.get("last_nonzero") or "ніколи"
+            lines.append(
+                f"⚠️ <b>{_h(st['label'])}</b>: 0 результатів {streak} запусків підряд "
+                f"(останній улов: {last}) — перевір джерело"
+            )
+    return lines
+
+
 def format_telegram_digest(
     *,
     region: str,
@@ -885,6 +985,7 @@ def format_telegram_digest(
     days: int,
     enrich_count: int,
     top: int = 10,
+    health_lines: list[str] | None = None,
 ) -> str:
     """Compact Telegram digest for the daily scraper run."""
     today = date.today().strftime("%d.%m.%Y")
@@ -912,13 +1013,17 @@ def format_telegram_digest(
         lines.append(f"➖ Вийшли зі зрізу: <b>{dropped_count}</b>")
     if enrich_count:
         lines.append(f"📧 Збагачено: <b>{enrich_count}</b> email/сума/CPV")
+    if health_lines:
+        lines.extend(health_lines)
+
+    footer = f"\n<i>tender-scraper v{__version__} · GrandMa Agency · grandma.agency</i>"
 
     if not records:
         lines.extend([
             "",
             f"✅ Нових тендерів не знайдено за останні {days} днів — база актуальна",
         ])
-        return "\n".join(lines)
+        return "\n".join(lines) + footer
 
     sorted_records = sorted(
         highlight_records,
@@ -948,7 +1053,7 @@ def format_telegram_digest(
             lines.append(f'   🔗 <a href="{_h(url)}">{source}</a>')
         lines.append("")
 
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip() + footer
 
 
 # ── Bund.de RSS scraper ────────────────────────────────────────────────────────
@@ -1026,7 +1131,7 @@ def search_bund_de(days: int, verbose: bool = True):
 
     req = urllib.request.Request(
         BUND_RSS_URL,
-        headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+        headers={"User-Agent": UA_FULL},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -1169,7 +1274,7 @@ def search_simap_ch(days: int, verbose: bool = True):
                 url,
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+                    "User-Agent": UA_FULL,
                     "Referer": "https://www.simap.ch/",
                 },
             )
@@ -1314,7 +1419,7 @@ def search_vergabe_nrw(days: int, verbose: bool = True):
 
     req = urllib.request.Request(
         VERGABE_NRW_RSS,
-        headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+        headers={"User-Agent": UA_FULL},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -1434,7 +1539,7 @@ def search_bescha_de(days: int, verbose: bool = True):
         try:
             req = urllib.request.Request(
                 rss_url,
-                headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+                headers={"User-Agent": UA_FULL},
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
@@ -1574,7 +1679,7 @@ def search_dab_de(days: int, verbose: bool = True):
         "Content-Type": "application/json",
         "Referer": f"{DAB_BASE_URL}/auftrag-finden",
         "Origin": DAB_BASE_URL,
-        "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+        "User-Agent": UA_FULL,
     }
 
     for term in DAB_SEARCH_TERMS:
@@ -1744,7 +1849,7 @@ def search_oeffentlich_de(countries: list[str], days: int, verbose: bool = True)
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)",
+                    "User-Agent": UA_FULL,
                     "Accept": "*/*",
                 },
             )
@@ -1903,7 +2008,7 @@ def search_open_nrw(days: int, verbose: bool = True):
         url = f"{OPEN_NRW_CKAN_URL}?id={OPEN_NRW_PACKAGE_ID}"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+            headers={"User-Agent": UA_FULL},
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             package_data = json.loads(resp.read())
@@ -1944,7 +2049,7 @@ def search_open_nrw(days: int, verbose: bool = True):
 
         req = urllib.request.Request(
             csv_url,
-            headers={"User-Agent": "WAT-tender-scraper/1.0 (grandma.agency)"},
+            headers={"User-Agent": UA_FULL},
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             csv_content = resp.read().decode("utf-8", errors="ignore")
@@ -2031,7 +2136,7 @@ def process_open_nrw_item(item: dict, seen_ids: set, state: dict,
 
 # ── Cosinex NetServer helper (reused by MV, München) ─────────────────────────
 
-_COSINEX_UA = "Mozilla/5.0 (compatible; WAT-tender-scraper/1.0; +https://grandma.agency)"
+_COSINEX_UA = UA_BROWSER
 
 def _cosinex_get_html(url: str, timeout: int = 20) -> str | None:
     """Завантажує HTML сторінку Cosinex NetServer порталу."""
@@ -2482,7 +2587,7 @@ def process_had_item(item: dict, seen_ids: set, state: dict,
 
 EVERGABE_SH_BASE = "https://www.e-vergabe-sh.de/vergabeplattform/bekanntmachungen"
 EVERGABE_SH_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; WAT-tender-scraper/1.0; +https://grandma.agency)",
+    "User-Agent": UA_BROWSER,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "de-DE,de;q=0.9",
 }
@@ -2675,7 +2780,7 @@ VERGABE_BY_FRAME = (
     "?filter=604283&config=exante/false"
 )
 VERGABE_BY_AJAX = "https://www.meinauftrag.rib.de/public/nextPublications"
-_BY_UA = "Mozilla/5.0 (compatible; WAT-tender-scraper/1.0; +https://grandma.agency)"
+_BY_UA = UA_BROWSER
 
 _BY_MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -2921,6 +3026,134 @@ def process_vergabe_by_item(item: dict, seen_ids: set, state: dict,
 
 # ── Health Check ──────────────────────────────────────────────────────────────
 
+# ── USP Bekanntmachungsportal (Австрія, включно з підпороговими) ──────────────
+# Офіційний агрегатор Kerndaten за BVergG 2018 (BRZ/BMDW): сюди стікаються
+# оголошення з усіх AT-платформ (vergabeportal.at, ANKÖ, vemap...), включно з
+# підпороговими, яких немає в TED. JSON без логіну. Знайдено 2026-06-12.
+# kdBaseTypes=bm — тільки активні оголошення (bg — вже награні контракти).
+USP_AT_API_URL = "https://ausschreibungen.usp.gv.at/at.gv.bmdw.eproc-p/public/api/tenderlist"
+USP_AT_DETAIL_URL = "https://ausschreibungen.usp.gv.at/at.gv.bmdw.eproc-p/public/tender-detail?object={oid}"
+USP_AT_SEARCH_TERMS = _CFG.get("usp_terms", DAB_SEARCH_TERMS)
+USP_AT_PAGE_LEN = 200
+USP_AT_MAX_PAGES = 10  # safety cap: 2000 рядків на термін
+
+
+def search_usp_at(days: int, verbose: bool = True):
+    """Генератор: активні австрійські оголошення з USP-порталу за пошуковими термінами."""
+    if verbose:
+        print(f"\n[USP-AT] Пошук ({days}д, {len(USP_AT_SEARCH_TERMS)} terms)...")
+
+    from_date = (date.today() - timedelta(days=days)).isoformat()
+    to_date = date.today().isoformat()
+    seen_oids: set[str] = set()
+
+    for term in USP_AT_SEARCH_TERMS:
+        start = 0
+        for _page in range(USP_AT_MAX_PAGES):
+            params = urllib.parse.urlencode([
+                ("draw", "1"),
+                ("start", str(start)),
+                ("length", str(USP_AT_PAGE_LEN)),
+                ("orderColumn", "2"),
+                ("orderDir", "desc"),
+                ("kdBaseTypes[]", "bm"),
+                ("q", term),
+                ("fromdate", from_date),
+                ("todate", to_date),
+            ])
+            req = urllib.request.Request(
+                f"{USP_AT_API_URL}?{params}",
+                headers={"User-Agent": UA_FULL, "Accept": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                    # API віддає content-type text/plain, але тіло — валідний JSON
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                if verbose:
+                    print(f"  [{term}] помилка: {e}")
+                break
+
+            rows = data.get("data", [])
+            if verbose and start == 0 and rows:
+                print(f"  [{term}] знайдено: {data.get('recordsFiltered', '?')}")
+            if not rows:
+                break
+
+            for row in rows:
+                # row: [title, buyer, pub_date, deadline, object_id, eforms_flag, dl_alt1, dl_alt2]
+                oid = str(row[4]) if len(row) > 4 and row[4] else ""
+                if not oid or oid in seen_oids:
+                    continue
+                seen_oids.add(oid)
+                yield {
+                    "title": str(row[0] or ""),
+                    "buyer": str(row[1] or ""),
+                    "pub_date": str(row[2] or "")[:10],
+                    "deadline": _usp_at_deadline(row),
+                    "oid": oid,
+                }
+
+            start += USP_AT_PAGE_LEN
+            if start >= int(data.get("recordsFiltered") or 0):
+                break
+            time.sleep(RATE_LIMIT_SEC)
+
+
+def _usp_at_deadline(row: list) -> str:
+    """Дедлайн: поле [3]; для eForms-записів (прапорець [5]) — у [6]/[7]."""
+    candidates = [row[3] if len(row) > 3 else None]
+    if len(row) > 5 and row[5]:
+        candidates += [row[6] if len(row) > 6 else None, row[7] if len(row) > 7 else None]
+    for c in candidates:
+        if c:
+            return str(c)[:10]
+    return ""
+
+
+def process_usp_at_item(item: dict, seen_ids: set, state: dict,
+                        min_score: int) -> dict | None:
+    """Нормалізує USP-AT оголошення у стандартний tender record."""
+    tender_id = f"uspat_{item['oid'].replace('-', '_')}"
+
+    if tender_id in state.get("tenders", {}) or tender_id in seen_ids:
+        return None
+
+    days_left = None
+    if item["deadline"]:
+        try:
+            dl = datetime.strptime(item["deadline"], "%Y-%m-%d").date()
+            days_left = (dl - date.today()).days
+        except ValueError:
+            pass
+
+    title = item["title"]
+    keywords_found = [kw for kw in SOLAR_KEYWORDS if kw.lower() in title.lower()]
+
+    # Базовий 25 — USP вже пошукав за нашими термінами (бюджет у Kerndaten не публікується)
+    score = min(25 + score_tender([], keywords_found, None, days_left), 100)
+    if score < min_score:
+        return None
+
+    return {
+        "tender_id":           tender_id,
+        "publication_number":  item["oid"],
+        "title":               title[:300],
+        "buyer_name":          item["buyer"][:200],
+        "buyer_country":       "AT",
+        "buyer_email":         "",
+        "cpv_codes":           "",
+        "keyword_match":       ",".join(keywords_found),
+        "estimated_value_eur": "",
+        "deadline_date":       item["deadline"],
+        "days_until_deadline": days_left if days_left is not None else "",
+        "publication_date":    item["pub_date"],
+        "priority_score":      score,
+        "ted_url":             USP_AT_DETAIL_URL.format(oid=item["oid"]),
+        "source":              "USP.gv.at",
+    }
+
+
 def run_health_check(sources: list[str] | None = None) -> None:
     """
     Перевіряє доступність усіх джерел.
@@ -2961,7 +3194,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
                 detail = f"{len(data.get('notices', []))} notices" if ok else "API error"
 
             elif source_key == "bund":
-                req = urllib.request.Request(BUND_RSS_URL, headers={"User-Agent": "WAT-tender-scraper/1.0"})
+                req = urllib.request.Request(BUND_RSS_URL, headers={"User-Agent": UA_SHORT})
                 with urllib.request.urlopen(req, timeout=10) as r:
                     raw = r.read()
                 root = ET.fromstring(raw)
@@ -2972,7 +3205,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
             elif source_key == "oeffentlich":
                 target_day = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
                 url = f"{OEFFENTLICH_API_URL}?pubDay={target_day}&format=csv.zip"
-                req = urllib.request.Request(url, headers={"User-Agent": "WAT-tender-scraper/1.0"})
+                req = urllib.request.Request(url, headers={"User-Agent": UA_SHORT})
                 with urllib.request.urlopen(req, timeout=15) as r:
                     zdata = r.read()
                 import zipfile as _zf, io as _io
@@ -2995,7 +3228,7 @@ def run_health_check(sources: list[str] | None = None) -> None:
                     "nrw-open": "https://open.nrw",
                 }
                 url = portal_urls.get(source_key, "https://example.com")
-                req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "WAT-tender-scraper/1.0"})
+                req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": UA_SHORT})
                 try:
                     with urllib.request.urlopen(req, timeout=10) as r:
                         ok = r.status < 500
@@ -3097,8 +3330,8 @@ def main():
     parser.add_argument(
         "--source",
         default="all",
-        choices=["all", "ted", "bund", "simap", "nrw", "dab", "oeffentlich", "mv", "muc", "had", "sh", "by", "bescha", "nrw-open"],
-        help="Джерело: all, ted, bund, simap, nrw, dab, oeffentlich, mv, muc, had, sh, by, bescha, nrw-open (default: all)",
+        choices=["all", "ted", "bund", "simap", "usp-at", "nrw", "dab", "oeffentlich", "mv", "muc", "had", "sh", "by", "bescha", "nrw-open"],
+        help="Джерело: all, ted, bund, simap, usp-at, nrw, dab, oeffentlich, mv, muc, had, sh, by, bescha, nrw-open (default: all)",
     )
     parser.add_argument(
         "--health-check",
@@ -3115,6 +3348,11 @@ def main():
         type=int,
         default=ENRICH_LIMIT,
         help=f"Максимум detail-сторінок за один запуск (default: {ENRICH_LIMIT})",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"tender-scraper {__version__}",
     )
     args = parser.parse_args()
 
@@ -3158,6 +3396,8 @@ def main():
         active_sources.append("Bund.de")
     if args.source in ("all", "simap") and region in ("CH", "DACH"):
         active_sources.append("simap.ch")
+    if args.source in ("all", "usp-at") and region in ("AT", "DACH"):
+        active_sources.append("USP.gv.at (AT)")
     if args.source in ("all", "nrw") and region in ("DE", "DACH"):
         active_sources.append("vergabe.nrw")
     if args.source in ("all", "dab") and region in ("DE", "DACH"):
@@ -3221,276 +3461,86 @@ def main():
 
     dedup_state = {"tenders": {}} if args.no_dedup else state
 
-    # ── TED ──────────────────────────────────────────────────────────────────────
+    # Лічильники для health-моніторингу джерел: key → {label, fetched, kept}
+    run_stats: dict[str, dict] = {}
+
+    def consume(key: str, label: str, gen, processor):
+        """Прокручує генератор джерела через processor і пише записи в CSV.
+
+        fetched — скільки сирих елементів віддало джерело (сигнал «джерело живе»),
+        kept — скільки пройшло фільтри/дедуп і потрапило в CSV.
+        """
+        nonlocal total_records
+        st = run_stats.setdefault(key, {"label": label, "fetched": 0, "kept": 0})
+        for item in gen:
+            st["fetched"] += 1
+            record = processor(item, seen_ids, dedup_state, args.min_score)
+            if record is None:
+                continue
+            ensure_writer(record)
+            writer.writerow(_clean_record(record))
+            csv_file.flush()
+            seen_ids.add(record["tender_id"])
+            current_ids.add(record["tender_id"])
+            if record["tender_id"] not in previous_ids:
+                added_ids.add(record["tender_id"])
+            if not args.no_dedup:
+                state["tenders"][record["tender_id"]] = record["publication_number"]
+                state["tender_dates"].setdefault(record["tender_id"], today.isoformat())
+            st["kept"] += 1
+            total_records += 1
+            if verbose and total_records % 10 == 0:
+                print(f"  ✓ {total_records} тендерів записано...")
+
+    # ── TED: keyword-пошук + CPV-пошук (дедуп автоматичний) ─────────────────────
     if args.source in ("all", "ted"):
         if verbose:
             print("[TED] Пошук тендерів...")
-        for notice in search_ted(countries, args.days, verbose=verbose):
-            record = process_notice(notice, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── TED (CPV-based — доповнює keyword пошук, дедуп автоматичний) ────────────────────
-    if args.source in ("all", "ted"):
+        consume("ted", "TED",
+                search_ted(countries, args.days, verbose=verbose), process_notice)
         cpv_q = build_cpv_query(countries, args.days)
         if verbose:
             print("[TED CPV] Пошук за CPV 09331200/09332000/45261215...")
-        for notice in search_ted(countries, args.days, verbose=verbose, query=cpv_q):
-            record = process_notice(notice, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
+        consume("ted", "TED",
+                search_ted(countries, args.days, verbose=verbose, query=cpv_q), process_notice)
 
-    # ── Bund.de (тільки для DE або DACH) ─────────────────────────────────────────
-    if args.source in ("all", "bund") and region in ("DE", "DACH"):
-        for item in search_bund_de(args.days, verbose=verbose):
-            record = process_bund_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
+    # ── Решта джерел: (key, label, source-аргументи, тільки-явний, генератор, процесор) ──
+    # bescha / nrw-open: з "all" виключено (нестабільні endpoint'и), had: потребує логіну.
+    de_sources = [
+        ("bund", "Bund.de", ("all", "bund"),
+         lambda: search_bund_de(args.days, verbose=verbose), process_bund_item),
+        ("nrw", "vergabe.nrw", ("all", "nrw"),
+         lambda: search_vergabe_nrw(args.days, verbose=verbose), process_vergabe_item),
+        ("dab", "DAB.de", ("all", "dab"),
+         lambda: search_dab_de(args.days, verbose=verbose), process_dab_item),
+        ("oeffentlich", "oeffentlichevergabe", ("all", "oeffentlich"),
+         lambda: search_oeffentlich_de(countries, args.days, verbose=verbose), process_oeffentlich_item),
+        ("bescha", "bescha.bund.de", ("bescha",),
+         lambda: search_bescha_de(args.days, verbose=verbose), process_bescha_item),
+        ("mv", "evergabe-mv", ("all", "mv"),
+         lambda: search_evergabe_mv(args.days, verbose=verbose), process_evergabe_mv_item),
+        ("muc", "vergabe.muenchen", ("all", "muc"),
+         lambda: search_vergabe_muc(args.days, verbose=verbose), process_vergabe_muc_item),
+        ("had", "had.de", ("had",),
+         lambda: search_had_hessen(args.days, verbose=verbose), process_had_item),
+        ("sh", "e-vergabe-sh", ("all", "sh"),
+         lambda: search_evergabe_sh(args.days, verbose=verbose), process_evergabe_sh_item),
+        ("by", "vergabe.bayern", ("all", "by"),
+         lambda: search_vergabe_by(args.days, verbose=verbose), process_vergabe_by_item),
+        ("nrw-open", "open.nrw", ("nrw-open",),
+         lambda: search_open_nrw(args.days, verbose=verbose), process_open_nrw_item),
+    ]
+    for key, label, allowed, gen_factory, processor in de_sources:
+        if args.source in allowed and region in ("DE", "DACH"):
+            consume(key, label, gen_factory(), processor)
 
-    # ── simap.ch (тільки для CH або DACH) ────────────────────────────────────────
     if args.source in ("all", "simap") and region in ("CH", "DACH"):
-        for item in search_simap_ch(args.days, verbose=verbose):
-            record = process_simap_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
+        consume("simap", "simap.ch",
+                search_simap_ch(args.days, verbose=verbose), process_simap_item)
 
-    # ── vergabe.nrw.de (тільки для DE або DACH) ──────────────────────────────────
-    if args.source in ("all", "nrw") and region in ("DE", "DACH"):
-        for item in search_vergabe_nrw(args.days, verbose=verbose):
-            record = process_vergabe_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── DAB.de (тільки для DE або DACH) ──────────────────────────────────────────
-    if args.source in ("all", "dab") and region in ("DE", "DACH"):
-        for item in search_dab_de(args.days, verbose=verbose):
-            record = process_dab_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── oeffentlichevergabe.de (тільки для DE або DACH) ─────────────────────────────────────────
-    if args.source in ("all", "oeffentlich") and region in ("DE", "DACH"):
-        for item in search_oeffentlich_de(countries, args.days, verbose=verbose):
-            record = process_oeffentlich_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── bescha.bund.de (тільки явний --source bescha; з "all" виключено — evergabe-online.de повертає HTTP 400) ──
-    if args.source == "bescha" and region in ("DE", "DACH"):
-        for item in search_bescha_de(args.days, verbose=verbose):
-            record = process_bescha_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── evergabe-mv.de (Mecklenburg-Vorpommern / Cosinex NetServer) ─────────────
-    if args.source in ("all", "mv") and region in ("DE", "DACH"):
-        for item in search_evergabe_mv(args.days, verbose=verbose):
-            record = process_evergabe_mv_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── vergabe.muenchen.de (München / Cosinex NetServer) ────────────────────────
-    if args.source in ("all", "muc") and region in ("DE", "DACH"):
-        for item in search_vergabe_muc(args.days, verbose=verbose):
-            record = process_vergabe_muc_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── had.de (Hessen) ── login required, explicit --source had only ────────────
-    if args.source in ("had",) and region in ("DE", "DACH"):
-        for item in search_had_hessen(args.days, verbose=verbose):
-            record = process_had_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── e-vergabe-sh.de (Schleswig-Holstein) ─────────────────────────────────────
-    if args.source in ("all", "sh") and region in ("DE", "DACH"):
-        for item in search_evergabe_sh(args.days, verbose=verbose):
-            record = process_evergabe_sh_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── vergabe.bayern.de (Bayern / RIB platform) ────────────────────────────────
-    if args.source in ("all", "by") and region in ("DE", "DACH"):
-        for item in search_vergabe_by(args.days, verbose=verbose):
-            record = process_vergabe_by_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
-
-    # ── open.nrw (тільки явний --source nrw-open; з "all" виключено — CKAN XML endpoints повертають 404) ──
-    if args.source == "nrw-open" and region in ("DE", "DACH"):
-        for item in search_open_nrw(args.days, verbose=verbose):
-            record = process_open_nrw_item(item, seen_ids, dedup_state, args.min_score)
-            if record is None:
-                continue
-            ensure_writer(record)
-            writer.writerow(_clean_record(record))
-            csv_file.flush()
-            seen_ids.add(record["tender_id"])
-            current_ids.add(record["tender_id"])
-            if record["tender_id"] not in previous_ids:
-                added_ids.add(record["tender_id"])
-            if not args.no_dedup:
-                state["tenders"][record["tender_id"]] = record["publication_number"]
-            total_records += 1
-            if verbose and total_records % 10 == 0:
-                print(f"  ✓ {total_records} тендерів записано...")
+    if args.source in ("all", "usp-at") and region in ("AT", "DACH"):
+        consume("usp-at", "USP.gv.at",
+                search_usp_at(args.days, verbose=verbose), process_usp_at_item)
 
     if csv_file:
         csv_file.close()
@@ -3500,12 +3550,37 @@ def main():
     if total_records > 0 and not args.no_enrich:
         enrich_count = enrich_csv(output_path, limit=args.enrich_limit, verbose=verbose)
 
+    # ── Health-статистика по джерелах (zero_streak → алерт про мертве джерело) ──
+    today_iso = today.isoformat()
+    for key, st in run_stats.items():
+        s = state["source_stats"].setdefault(key, {})
+        s["label"] = st["label"]
+        s["last_run"] = today_iso
+        s["last_fetched"] = st["fetched"]
+        if st["fetched"] > 0:
+            s["zero_streak"] = 0
+            s["last_nonzero"] = today_iso
+        else:
+            s["zero_streak"] = s.get("zero_streak", 0) + 1
+
     save_state(state)
+
+    # Копія latest.csv поруч з датованим файлом (тільки для дефолтного output)
+    if args.output is None and total_records > 0:
+        latest_path = output_path.with_name(f"tenders_{region.lower()}_latest.csv")
+        try:
+            shutil.copy2(output_path, latest_path)
+        except OSError as e:
+            print(f"WARN: не вдалося оновити {latest_path}: {e}", file=sys.stderr)
 
     elapsed = time.time() - t0
 
     if verbose:
         print(f"\n  Результат: {total_records} тендерів (score ≥ {args.min_score})")
+        for key, st in run_stats.items():
+            streak = state["source_stats"].get(key, {}).get("zero_streak", 0)
+            mark = f"  ⚠️ {streak} запусків без результатів" if streak >= ZERO_STREAK_ALERT else ""
+            print(f"    {st['label']}: отримано {st['fetched']}, у CSV {st['kept']}{mark}")
         if enrich_count:
             print(f"  Збагачено: {enrich_count} тендерів (email/сума/CPV з detail-сторінок)")
         print(f"  Час виконання: {elapsed:.1f} сек")
@@ -3527,6 +3602,7 @@ def main():
             days=args.days,
             enrich_count=enrich_count,
             top=10,
+            health_lines=build_health_lines(run_stats, state["source_stats"]),
         )
         tg_notify(msg)
 

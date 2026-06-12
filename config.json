@@ -56,5 +56,33 @@
     "carport pv-anlage",
     "photovoltaik parkplatzüberdachung",
     "parkplatzüberdachung pv-anlage"
-  ]
+  ],
+
+  "usp_terms": [
+    "solar carport",
+    "photovoltaik carport",
+    "parkplatz photovoltaik",
+    "parkplatzüberdachung",
+    "photovoltaik"
+  ],
+
+  "scoring": {
+    "cpv_exact": 40,
+    "cpv_partial": 25,
+    "keywords_3plus": 30,
+    "keywords_2": 20,
+    "keywords_1": 10,
+    "budget_large": 20,
+    "budget_medium": 15,
+    "budget_small": 5,
+    "budget_unknown": 5,
+    "budget_large_min_eur": 500000,
+    "budget_medium_min_eur": 50000,
+    "deadline_optimal": 10,
+    "deadline_urgent": 2,
+    "deadline_far": 5,
+    "deadline_optimal_min_days": 10,
+    "deadline_optimal_max_days": 45,
+    "ft_base": 15
+  }
 }
